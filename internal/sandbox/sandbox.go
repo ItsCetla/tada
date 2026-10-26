@@ -107,17 +107,18 @@ func New(s Settings, projectRoot, workingDir, dataDir string) *Policy {
 			protected = append(protected, filepath.Join(dir, name))
 		}
 		entries = append(entries, filepath.Join(dir, ".git"))
-		for _, gitDir := range gitDirs(dir) {
+		gitDirs, writable := gitDirs(dir)
+		if mode == ModeWorkspaceWrite {
+			// Git folders that live outside the project, as with a linked
+			// worktree, still need writing to for commits.
+			p.WritableRoots = append(p.WritableRoots, writable...)
+		}
+		for _, gitDir := range gitDirs {
 			entries = append(entries, gitDir)
 			// gitMetaRE covers these too, but only below a folder named
 			// .git, which a linked worktree's git folder may not be.
 			for _, name := range gitMetaNames {
 				protected = append(protected, filepath.Join(gitDir, name))
-			}
-			// Git folders that live outside the project, as with a linked
-			// worktree, still need writing to for commits.
-			if mode == ModeWorkspaceWrite {
-				p.WritableRoots = append(p.WritableRoots, gitDir)
 			}
 		}
 	}
@@ -233,31 +234,102 @@ func goCacheDir(projectRoot string) string {
 	return dir
 }
 
-// gitDirs returns the git folder for dir and, for a linked worktree, the
-// shared one. It reads the files git leaves rather than running git.
-func gitDirs(dir string) []string {
+// gitDirs returns the git folders for dir: its .git folder or the one its
+// .git file points to, and for a linked worktree the shared git folder too.
+// Commands may write to the second list. A .git or commondir file can name
+// any folder, so a folder it points to is only writable when it has the
+// layout git itself would create.
+func gitDirs(dir string) (dirs, writable []string) {
 	dotGit := filepath.Join(dir, ".git")
 	info, err := os.Stat(dotGit)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	gitDir := dotGit
+	trusted := true
 	if !info.IsDir() {
 		b, err := os.ReadFile(dotGit)
 		if err != nil {
-			return nil
+			return nil, nil
 		}
 		rest, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "gitdir:")
 		if !ok {
-			return nil
+			return nil, nil
 		}
 		gitDir = filepathext.SmartJoin(dir, strings.TrimSpace(rest))
+		trusted = trustedGitDir(dir, gitDir)
 	}
-	dirs := []string{gitDir}
-	if b, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
-		dirs = append(dirs, filepathext.SmartJoin(gitDir, strings.TrimSpace(string(b))))
+	dirs = []string{gitDir}
+	if trusted {
+		writable = append(writable, gitDir)
 	}
-	return dirs
+	b, err := os.ReadFile(filepath.Join(gitDir, "commondir"))
+	if err != nil {
+		return dirs, writable
+	}
+	common := filepathext.SmartJoin(gitDir, strings.TrimSpace(string(b)))
+	dirs = append(dirs, common)
+	// Git puts a linked worktree's folder at <common>/worktrees/<name>.
+	wt := filepathext.Canonical(gitDir)
+	if trusted && filepath.Base(filepath.Dir(wt)) == "worktrees" &&
+		filepathext.Canonical(common) == filepath.Dir(filepath.Dir(wt)) &&
+		isRepoDir(common) && safeGitRoot(common) {
+		writable = append(writable, common)
+	} else {
+		slog.Warn("Sandbox not allowing writes to untrusted git commondir", "dir", dir, "commondir", common)
+	}
+	return dirs, writable
+}
+
+// trustedGitDir reports whether gitDir, named by dir's .git file, is a
+// linked worktree's git folder that points back to dir, or a submodule's
+// git folder inside the .git/modules of a repo that contains dir.
+func trustedGitDir(dir, gitDir string) bool {
+	real := filepathext.Canonical(gitDir)
+	ok := false
+	switch {
+	case !safeGitRoot(real):
+	case filepath.Base(filepath.Dir(real)) == "worktrees":
+		// Git checks the same backlink before using a worktree.
+		b, err := os.ReadFile(filepath.Join(real, "gitdir"))
+		ok = err == nil && isFile(filepath.Join(real, "HEAD")) &&
+			filepathext.Canonical(strings.TrimSpace(string(b))) == filepathext.Canonical(filepath.Join(dir, ".git"))
+	default:
+		top, after, found := strings.Cut(real, modulesSep)
+		ok = found && after != "" && within(top, filepathext.Canonical(dir)) && isRepoDir(real)
+	}
+	if !ok {
+		slog.Warn("Sandbox not allowing writes to untrusted git folder", "dir", dir, "gitdir", gitDir)
+	}
+	return ok
+}
+
+// modulesSep is where git keeps submodules' git folders.
+const modulesSep = string(filepath.Separator) + ".git" + string(filepath.Separator) + "modules" + string(filepath.Separator)
+
+// isRepoDir reports whether dir looks like a git folder with its own
+// objects.
+func isRepoDir(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, "objects"))
+	return err == nil && info.IsDir() && isFile(filepath.Join(dir, "HEAD"))
+}
+
+func isFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+// safeGitRoot reports whether dir is a folder commands could be let write
+// to: not the file system root, the home folder, or a folder above it.
+func safeGitRoot(dir string) bool {
+	dir = filepathext.Canonical(dir)
+	if dir == filepath.Dir(dir) {
+		return false
+	}
+	if home, err := os.UserHomeDir(); err == nil && within(dir, filepathext.Canonical(home)) {
+		return false
+	}
+	return true
 }
 
 // canonicalSet resolves each path and drops empties and duplicates.

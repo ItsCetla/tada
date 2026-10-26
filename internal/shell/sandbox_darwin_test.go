@@ -4,6 +4,7 @@ package shell
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -389,5 +390,28 @@ func TestSandbox_RedirectThroughLinksInProject(t *testing.T) {
 	require.NoError(t, err, stderr)
 	for _, p := range []string{"a.txt", "sub/b.txt", "c.txt"} {
 		require.FileExists(t, filepath.Join(f.proj, p))
+	}
+}
+
+// TestSandbox_CaseVariantsOfAbsentProtectedPaths creates protected paths
+// that don't exist yet under a different letter case, which a
+// case-insensitive volume would treat as the same file.
+func TestSandbox_CaseVariantsOfAbsentProtectedPaths(t *testing.T) {
+	t.Parallel()
+	for _, rel := range []string{".TADARC", ".Envrc", ".git/COMMONDIR", ".git/Info/attributes", ".GIT/hooks/x"} {
+		for _, sh := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s sh=%v", rel, sh), func(t *testing.T) {
+				t.Parallel()
+				f := newSandboxFixture(t, "proj")
+				require.NoError(t, os.RemoveAll(filepath.Join(f.proj, ".git", "hooks")))
+				command := `mkdir -p "$(dirname ` + rel + `)"; echo x > ` + rel
+				if sh {
+					command = `/bin/sh -c '` + command + `'`
+				}
+				_, stderr, err := f.exec(t, command)
+				require.Error(t, err, stderr)
+				requireNoFile(t, filepath.Join(f.proj, rel))
+			})
+		}
 	}
 }
