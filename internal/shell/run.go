@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/charmbracelet/crush/internal/sandbox"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
@@ -85,7 +86,7 @@ func Run(ctx context.Context, opts RunOptions) (err error) {
 		return fmt.Errorf("could not parse command: %w", err)
 	}
 
-	runner, err := newRunner(opts.Cwd, opts.Env, opts.Stdin, stdout, stderr, opts.BlockFuncs)
+	runner, err := newRunner(opts.Cwd, opts.Env, opts.Stdin, stdout, stderr, opts.BlockFuncs, nil)
 	if err != nil {
 		return fmt.Errorf("could not run command: %w", err)
 	}
@@ -183,15 +184,21 @@ func RunAndCapturePTY(ctx context.Context, opts RunOptions) (CaptureResult, erro
 
 // newRunner constructs an [interp.Runner] configured with the standard
 // Ta-Da handler stack. Shared by the stateless [Run] entrypoint and the
-// stateful [Shell] so the two surfaces cannot drift.
-func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writer, blockFuncs []BlockFunc) (*interp.Runner, error) {
+// stateful [Shell] so the two surfaces cannot drift. A nil policy means no
+// sandbox.
+func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writer, blockFuncs []BlockFunc, policy *sandbox.Policy) (*interp.Runner, error) {
 	env = withNonInteractiveEnv(env)
+	if policy.Active() && policy.GoCache != "" {
+		// The sandbox can't write the usual Go cache, and a cache shared
+		// with unsandboxed builds could be poisoned.
+		env = append(env, "GOCACHE="+policy.GoCache)
+	}
 	return interp.New(
 		interp.StdIO(stdin, stdout, stderr),
 		interp.Interactive(false),
 		interp.Env(expand.ListEnviron(env...)),
 		interp.Dir(cwd),
-		execHandlerOption(blockFuncs),
+		execHandlerOption(blockFuncs, policy),
 	)
 }
 
@@ -205,15 +212,28 @@ func newRunner(cwd string, env []string, stdin io.Reader, stdout, stderr io.Writ
 // isolation. Without isolation, shells like zsh that set up job control
 // when sourcing framework files can send SIGINT/SIGTERM to Ta-Da's process
 // group and crash the parent.
-func execHandlerOption(blockFuncs []BlockFunc) interp.RunnerOption {
-	base := processGroupExecHandler(defaultKillTimeout)
+//
+// When policy is active, spawned processes run inside the sandbox and an
+// open handler holds the shell's own redirections to the same write rules.
+func execHandlerOption(blockFuncs []BlockFunc, policy *sandbox.Policy) interp.RunnerOption {
+	base := processGroupExecHandler(defaultKillTimeout, policy)
 	handler := base
-	for _, mw := range slices.Backward(standardHandlers(blockFuncs)) {
+	for _, mw := range slices.Backward(standardHandlers(blockFuncs, policy)) {
 		handler = mw(handler)
 	}
 	// ExecHandlers always appends DefaultExecHandler which lacks process
 	// group isolation, so we use the deprecated ExecHandler instead.
-	return interp.ExecHandler(handler)
+	execOpt := interp.ExecHandler(handler)
+	if !policy.Active() {
+		return execOpt
+	}
+	openOpt := interp.OpenHandler(sandboxOpenHandler(policy))
+	return func(r *interp.Runner) error {
+		if err := execOpt(r); err != nil {
+			return err
+		}
+		return openOpt(r)
+	}
 }
 
 // nonInteractiveEnvVars are forced on every shell execution to prevent
@@ -373,14 +393,15 @@ type execMiddleware = func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc
 //     that deny rules see the already-resolved argv of anything the
 //     script exec's rather than the outer path-prefixed wrapper;
 //  3. block list;
-//  4. optional Go coreutils (only when useGoCoreUtils is on).
-func standardHandlers(blockFuncs []BlockFunc) []execMiddleware {
+//  4. optional Go coreutils (only when useGoCoreUtils is on and there is
+//     no sandbox, since they would write from Ta-Da's own process).
+func standardHandlers(blockFuncs []BlockFunc, policy *sandbox.Policy) []execMiddleware {
 	handlers := []execMiddleware{
 		builtinHandler(),
-		scriptDispatchHandler(blockFuncs),
+		scriptDispatchHandler(blockFuncs, policy),
 		blockHandler(blockFuncs),
 	}
-	if useGoCoreUtils && coreUtilsExecHandler != nil {
+	if useGoCoreUtils && coreUtilsExecHandler != nil && !policy.Active() {
 		handlers = append(handlers, coreUtilsExecHandler)
 	}
 	return handlers

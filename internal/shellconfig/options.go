@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -189,6 +190,9 @@ func handleOption(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		if val == "" {
 			return usage(stderr, fmt.Sprintf("option: %s requires a value", key))
 		}
+		if len(spec.allowed) > 0 && !slices.Contains(spec.allowed, val) {
+			return usage(stderr, fmt.Sprintf("option: %s expects one of %s, got %q", key, strings.Join(spec.allowed, ", "), val))
+		}
 		o[spec.jsonKey] = val
 		slog.Info("Option set in shell config", "key", key, "value", val)
 		return nil
@@ -214,6 +218,8 @@ type optionSpec struct {
 	jsonKey  string
 	kind     optionKind
 	inverted bool
+	// allowed lists the only values a string option accepts; empty means any.
+	allowed []string
 }
 
 // optionSpecs maps user-facing kebab-case keys to their JSON field and type.
@@ -243,6 +249,10 @@ var optionSpecs = map[string]optionSpec{
 	"data-directory": {jsonKey: "data_directory", kind: optString},
 	"initialize-as":  {jsonKey: "initialize_as", kind: optString},
 	"worktree-dir":   {jsonKey: "worktree_dir", kind: optString},
+
+	// Sandbox for agent shell commands; see internal/sandbox.
+	"sandbox":         {jsonKey: "sandbox", kind: optString, allowed: []string{"off", "read-only", "workspace-write"}},
+	"sandbox-network": {jsonKey: "sandbox_network", kind: optBool},
 
 	// Integer fields, in seconds.
 	"request-timeout": {jsonKey: "request_timeout", kind: optInt},

@@ -50,3 +50,22 @@ func SplitGlobPrefix(pattern string) (prefix, rest string) {
 	parent := strings.Join(literal[:len(literal)-1], "/")
 	return parent, literal[len(literal)-1]
 }
+
+// Canonical resolves symlinks in p. When p doesn't exist it resolves the
+// deepest folder that does and adds the rest back, so a link higher up
+// still counts.
+func Canonical(p string) string {
+	p = filepath.Clean(p)
+	tail := ""
+	for {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(r, tail)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return filepath.Join(p, tail)
+		}
+		tail = filepath.Join(filepath.Base(p), tail)
+		p = parent
+	}
+}

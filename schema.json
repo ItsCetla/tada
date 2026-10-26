@@ -1177,6 +1177,21 @@
           "examples": [
             "~/worktrees"
           ]
+        },
+        "sandbox": {
+          "type": "string",
+          "enum": [
+            "off",
+            "read-only",
+            "workspace-write"
+          ],
+          "description": "Sandbox for agent shell commands (macOS only). workspace-write lets commands change only the project, temp and build caches; read-only lets them change only temp. Commands that stay in the sandbox with the network off run without asking",
+          "default": "off"
+        },
+        "sandbox_network": {
+          "type": "boolean",
+          "description": "Let sandboxed shell commands use the network. When on, commands ask for permission as usual",
+          "default": false
         }
       },
       "additionalProperties": false,
@@ -1479,6 +1494,14 @@
           "type": "boolean",
           "description": "Play the short animated intro when the TUI starts. Any key skips it. TADA_NO_INTRO=1 also turns it off",
           "default": true
+        },
+        "text_width": {
+          "type": "integer",
+          "description": "Widest chat text may grow, in columns. 0 fills the whole chat area",
+          "default": 0,
+          "examples": [
+            120
+          ]
         },
         "rich_blocks": {
           "type": "boolean",

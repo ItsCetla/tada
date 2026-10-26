@@ -9,6 +9,13 @@ listed; see the [upstream releases](https://github.com/charmbracelet/crush/relea
 
 ### Added
 
+- **Sandbox for shell commands on macOS.** `option sandbox
+  workspace-write` (or `read-only`) runs the agent's shell commands under
+  `sandbox-exec`, so they can only write to the project and temp folders,
+  and can't touch git hooks, git config or config files that run code.
+  With `option sandbox-network off` (the default) the network is cut off
+  too. It's an extra layer on top of permission prompts, which still
+  appear as usual. Off by default.
 - **Rewind undoes file changes made by bash commands.** Ta-Da takes a
   hidden git snapshot of the working directory before and after each
   foreground bash command and records the text files it changed, so

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/charmbracelet/crush/internal/sandbox"
 	"github.com/charmbracelet/x/exp/slice"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
@@ -68,6 +69,7 @@ type Shell struct {
 	mu         sync.Mutex
 	logger     Logger
 	blockFuncs []BlockFunc
+	sandbox    *sandbox.Policy
 }
 
 // Options for creating a new shell
@@ -76,6 +78,9 @@ type Options struct {
 	Env        []string
 	Logger     Logger
 	BlockFuncs []BlockFunc
+	// Sandbox, when non-nil and active, confines every command the shell
+	// runs.
+	Sandbox *sandbox.Policy
 }
 
 // NewShell creates a new shell instance with the given options
@@ -115,6 +120,7 @@ func NewShell(opts *Options) *Shell {
 		env:        env,
 		logger:     logger,
 		blockFuncs: opts.BlockFuncs,
+		sandbox:    opts.Sandbox,
 	}
 }
 
@@ -245,7 +251,7 @@ func splitArgsFlags(parts []string) (args []string, flags []string) {
 // newInterp creates a new interpreter with the current shell state. A nil
 // stdin is equivalent to an empty input stream.
 func (s *Shell) newInterp(stdin io.Reader, stdout, stderr io.Writer) (*interp.Runner, error) {
-	return newRunner(s.cwd, s.env, stdin, stdout, stderr, s.blockFuncs)
+	return newRunner(s.cwd, s.env, stdin, stdout, stderr, s.blockFuncs, s.sandbox)
 }
 
 // updateShellFromRunner updates the shell from the interpreter after execution.

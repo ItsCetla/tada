@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/rewind"
+	"github.com/charmbracelet/crush/internal/sandbox"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/snapshot"
 	"github.com/stretchr/testify/require"
@@ -66,7 +67,7 @@ func newHistoryBashTool(t *testing.T, files history.Service, root, dataDir strin
 	t.Cleanup(snapshot.Idle)
 	perms := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
-	return NewBashTool(perms, files, root, dataDir, attribution, "test-model")
+	return NewBashTool(perms, files, root, dataDir, attribution, "test-model", sandbox.Settings{})
 }
 
 func TestBashToolRewindUndoesShellChanges(t *testing.T) {

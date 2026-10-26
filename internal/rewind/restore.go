@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/filepathext"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
@@ -359,7 +360,7 @@ func (s *Service) rootFor(sess session.Session, path string) (root string, proje
 		if r == "" {
 			continue
 		}
-		for _, form := range []string{filepath.Clean(r), canonical(r)} {
+		for _, form := range []string{filepath.Clean(r), filepathext.Canonical(r)} {
 			if under(form, path) {
 				return form, i == 0
 			}
@@ -375,12 +376,12 @@ func (s *Service) insideProject(sess session.Session, path string) bool {
 	if !filepath.IsAbs(path) && s.projectRoot != "" {
 		path = filepath.Join(s.projectRoot, path)
 	}
-	p := canonical(path)
+	p := filepathext.Canonical(path)
 	for _, root := range roots {
 		if root == "" {
 			continue
 		}
-		rel, err := filepath.Rel(canonical(root), p)
+		rel, err := filepath.Rel(filepathext.Canonical(root), p)
 		if err != nil {
 			continue
 		}
@@ -400,12 +401,12 @@ func (s *Service) linksOutside(sess session.Session, path string) bool {
 		path = filepath.Join(s.projectRoot, path)
 	}
 	path = filepath.Clean(path)
-	dir := canonical(filepath.Dir(path))
+	dir := filepathext.Canonical(filepath.Dir(path))
 	for _, root := range roots {
-		if root == "" || (!under(filepath.Clean(root), path) && !under(canonical(root), path)) {
+		if root == "" || (!under(filepath.Clean(root), path) && !under(filepathext.Canonical(root), path)) {
 			continue
 		}
-		if !under(canonical(root), dir) {
+		if !under(filepathext.Canonical(root), dir) {
 			return true
 		}
 	}
@@ -416,25 +417,6 @@ func (s *Service) linksOutside(sess session.Session, path string) bool {
 func under(root, p string) bool {
 	rel, err := filepath.Rel(root, p)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// canonical resolves symlinks in p. When p doesn't exist it resolves the
-// deepest folder that does and adds the rest back, so a link higher up
-// still counts.
-func canonical(p string) string {
-	p = filepath.Clean(p)
-	tail := ""
-	for {
-		if r, err := filepath.EvalSymlinks(p); err == nil {
-			return filepath.Join(r, tail)
-		}
-		parent := filepath.Dir(p)
-		if parent == p {
-			return filepath.Join(p, tail)
-		}
-		tail = filepath.Join(filepath.Base(p), tail)
-		p = parent
-	}
 }
 
 // trimChat deletes msgs[idx:] and everything that hangs off them.

@@ -694,6 +694,48 @@ waiting. Edits needs the control hub; without it Shift+Tab skips Edits.
 Some actions ask even in Auto; see
 [Control, budgets and missions](#control-budgets-and-missions).
 
+### Sandbox
+
+On macOS, Ta-Da can run the agent's shell commands inside a sandbox. It's off
+by default.
+
+```bash
+option sandbox workspace-write   # or read-only, or off
+option sandbox-network off       # on lets sandboxed commands use the network
+```
+
+In `tada.json` the same settings are `options.sandbox` and
+`options.sandbox_network`.
+
+- **workspace-write** lets commands write to the project, the working
+  folder, temp folders, a Go build cache kept just for sandboxed commands
+  (Ta-Da sets `GOCACHE` to it) and the repo's git folder.
+- **read-only** lets commands write only to temp folders and that Go cache.
+- Either way, commands can't change `.git/hooks`, `.git/config` and other
+  git settings files, Ta-Da's data folder, or config files that could run
+  code later: `.tada`, `.claude`, `.github`, `.vscode`, `.idea`, `.husky`,
+  `tadarc`, `tada.json`, `.mcp.json` and `.envrc`. Because of that,
+  `git init`, `git clone`, `git config`, `git submodule update --init`,
+  `git worktree add` and setting an upstream (`git push -u`) need the
+  sandbox off.
+- Only the sandbox's own Go build cache is writable, not the module cache,
+  so `go mod download` and `go get` fail even with the network on.
+- Commands can't send Apple Events, so they can't script other apps.
+- With the network off, commands can still reach `localhost` over TCP, but
+  not Unix sockets, so tools that talk to a local agent (Docker, `gpg` or
+  `ssh-agent` signing) fail.
+
+The sandbox is an extra safety layer, not a replacement for permission
+prompts: Ta-Da still asks before running commands, just as it does with the
+sandbox off. It has limits worth knowing:
+
+- Commands can still read any file your user can, and DNS lookups work
+  even with the network off.
+- It doesn't confine macOS services that act for a command, so `open`,
+  `launchctl` and `defaults` can still start apps or change settings
+  outside the sandbox.
+- On Linux and Windows the setting does nothing.
+
 ### Disabling Skills
 
 You can prevent Ta-Da from using certain skills entirely. Disabled skills are

@@ -620,6 +620,11 @@ type Options struct {
 	// WorktreeDir is where /worktree creates Git worktrees. See
 	// internal/worktree.
 	WorktreeDir string `json:"worktree_dir,omitempty" jsonschema:"description=Directory that holds the Git worktrees /worktree creates. The repository name and branch are appended. Relative paths are resolved against the main checkout; ~ is expanded,default=../.tada-worktrees,example=~/worktrees"`
+	// Sandbox limits what agent shell commands can change. Only macOS has
+	// a sandbox; elsewhere commands run unconfined. See internal/sandbox.
+	Sandbox string `json:"sandbox,omitempty" jsonschema:"description=Sandbox for agent shell commands (macOS only). workspace-write lets commands change only the project\\, temp and build caches; read-only lets them change only temp. Commands that stay in the sandbox with the network off run without asking,enum=off,enum=read-only,enum=workspace-write,default=off"`
+	// SandboxNetwork lets sandboxed shell commands use the network.
+	SandboxNetwork bool `json:"sandbox_network,omitempty" jsonschema:"description=Let sandboxed shell commands use the network. When on\\, commands ask for permission as usual,default=false"`
 }
 
 // webTools are the built-in tools that make outbound network requests on

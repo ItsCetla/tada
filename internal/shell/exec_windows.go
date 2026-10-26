@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/crush/internal/proc"
+	"github.com/charmbracelet/crush/internal/sandbox"
 	"golang.org/x/sys/windows"
 	"mvdan.cc/sh/v3/interp"
 )
@@ -38,7 +39,8 @@ func isolateProcess(cmd *exec.Cmd) {
 // cmd.Wait blocks forever: the tool stays on "Waiting for tool response"
 // and cancelling does nothing. This handler puts the child in a job object
 // so cancel ends the whole tree, and sets WaitDelay so Wait always returns.
-func processGroupExecHandler(killTimeout time.Duration) interp.ExecHandlerFunc {
+// policy is ignored: Windows has no sandbox yet.
+func processGroupExecHandler(killTimeout time.Duration, policy *sandbox.Policy) interp.ExecHandlerFunc {
 	return func(ctx context.Context, args []string) error {
 		hc := interp.HandlerCtx(ctx)
 		path, err := interp.LookPathDir(hc.Dir, hc.Env, args[0])

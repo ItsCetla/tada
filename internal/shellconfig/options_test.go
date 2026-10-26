@@ -303,6 +303,31 @@ func TestOption_RequestTimeoutInvalid(t *testing.T) {
 	require.Contains(t, err.Error(), "expects a number of seconds")
 }
 
+func TestOption_Sandbox(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "tadarc")
+	script := "option sandbox workspace-write\noption sandbox-network on"
+	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(script))
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(jsonBytes, &result))
+
+	opts := result["options"].(map[string]any)
+	require.Equal(t, "workspace-write", opts["sandbox"])
+	require.Equal(t, true, opts["sandbox_network"])
+}
+
+func TestOption_SandboxInvalid(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "tadarc")
+	_, err := LoadShellConfig(t.Context(), path, []byte(`option sandbox on`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "expects one of off, read-only, workspace-write")
+}
+
 func TestOption_UIIntro(t *testing.T) {
 	t.Parallel()
 

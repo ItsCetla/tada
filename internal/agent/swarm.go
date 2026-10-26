@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/fleet"
 	"github.com/charmbracelet/crush/internal/hooks"
+	"github.com/charmbracelet/crush/internal/sandbox"
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/worktree"
 )
@@ -191,7 +192,7 @@ func (c *coordinator) swarmTools(coder config.Agent, dir, modelID string) []fant
 	dataDir := cfg.Options.DataDirectory
 	shell.SetScrubbedEnvVars(cfg.APIKeyEnvVars())
 	all := []fantasy.AgentTool{
-		tools.NewBashTool(c.permissions, c.history, dir, dataDir, cfg.Options.Attribution, modelID),
+		tools.NewBashTool(c.permissions, c.history, dir, dataDir, cfg.Options.Attribution, modelID, sandbox.Settings{Mode: cfg.Options.Sandbox, Network: cfg.Options.SandboxNetwork}),
 		tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, dir),
 		tools.NewGlobTool(dir, cfg.Tools.Glob),
 		tools.NewGrepTool(dir, cfg.Tools.Grep),

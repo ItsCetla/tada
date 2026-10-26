@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/sandbox"
 )
 
 const (
@@ -87,6 +88,12 @@ func GetBackgroundShellManager() *BackgroundShellManager {
 
 // Start creates and starts a new background shell with the given command.
 func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, blockFuncs []BlockFunc, command string, description string) (*BackgroundShell, error) {
+	return m.StartSandboxed(ctx, workingDir, blockFuncs, nil, command, description)
+}
+
+// StartSandboxed is Start with the command confined by policy. A nil policy
+// runs it unconfined.
+func (m *BackgroundShellManager) StartSandboxed(ctx context.Context, workingDir string, blockFuncs []BlockFunc, policy *sandbox.Policy, command string, description string) (*BackgroundShell, error) {
 	// Check job limit
 	if m.shells.Len() >= MaxBackgroundJobs {
 		return nil, fmt.Errorf("maximum number of background jobs (%d) reached. Please terminate or wait for some jobs to complete", MaxBackgroundJobs)
@@ -97,6 +104,7 @@ func (m *BackgroundShellManager) Start(ctx context.Context, workingDir string, b
 	shell := NewShell(&Options{
 		WorkingDir: workingDir,
 		BlockFuncs: blockFuncs,
+		Sandbox:    policy,
 	})
 
 	shellCtx, cancel := context.WithCancel(ctx)

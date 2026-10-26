@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/sandbox"
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/snapshot"
 	"github.com/charmbracelet/crush/internal/workdir"
@@ -211,7 +212,8 @@ func blockFuncs() []shell.BlockFunc {
 // NewBashTool returns the bash tool. dataDir is Ta-Da's data directory:
 // oversized output spills there, and when files is not nil it holds the
 // snapshots that record foreground commands' file changes for rewind.
-func NewBashTool(permissions permission.Service, files history.Service, workingDir, dataDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
+// sandboxSettings confines commands on macOS; see internal/sandbox.
+func NewBashTool(permissions permission.Service, files history.Service, workingDir, dataDir string, attribution *config.Attribution, modelID string, sandboxSettings sandbox.Settings) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		BashToolName,
 		string(bashDescription(attribution, modelID)),
@@ -237,6 +239,11 @@ func NewBashTool(permissions permission.Service, files history.Service, workingD
 			// and git must not be run inside a repository-shaped
 			// subdirectory whose config could run programs.
 			isSafeReadOnly := sameDir(execWorkingDir, workingDir) && isSafeReadOnlyCommand(params.Command)
+
+			// The sandbox is built per call because the working directory
+			// can change between calls.
+			projectRoot := config.ProjectRoot(workingDir)
+			policy := sandbox.New(sandboxSettings, projectRoot, workingDir, dataDir)
 
 			sessionID := GetSessionFromContext(ctx)
 			if sessionID == "" {
@@ -269,7 +276,7 @@ func NewBashTool(permissions permission.Service, files history.Service, workingD
 				bgManager := shell.GetBackgroundShellManager()
 				bgManager.Cleanup()
 				// Use background context so it continues after tool returns
-				bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description)
+				bgShell, err := bgManager.StartSandboxed(context.Background(), execWorkingDir, blockFuncs(), policy, params.Command, params.Description)
 				if err != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("error starting background shell: %w", err)
 				}
@@ -289,6 +296,7 @@ func NewBashTool(permissions permission.Service, files history.Service, workingD
 					}
 
 					stdout = formatOutput(stdout, stderr, execErr, dataDir)
+					stdout = addSandboxNote(policy, stdout, execErr)
 
 					metadata := BashResponseMetadata{
 						StartTime:        startTime.UnixMilli(),
@@ -350,7 +358,7 @@ func NewBashTool(permissions permission.Service, files history.Service, workingD
 			// Start with detached context so it can survive if moved to background
 			bgManager := shell.GetBackgroundShellManager()
 			bgManager.Cleanup()
-			bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description)
+			bgShell, err := bgManager.StartSandboxed(context.Background(), execWorkingDir, blockFuncs(), policy, params.Command, params.Description)
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("error starting shell: %w", err)
 			}
@@ -399,6 +407,7 @@ func NewBashTool(permissions permission.Service, files history.Service, workingD
 				}
 
 				stdout = formatOutput(stdout, stderr, execErr, dataDir)
+				stdout = addSandboxNote(policy, stdout, execErr)
 
 				metadata := BashResponseMetadata{
 					StartTime:        startTime.UnixMilli(),
@@ -520,4 +529,22 @@ func insideDir(dir, root string) bool {
 	realDir, errDir := filepath.EvalSymlinks(dir)
 	realRoot, errRoot := filepath.EvalSymlinks(root)
 	return errDir == nil && errRoot == nil && fsext.HasPrefix(realDir, realRoot)
+}
+
+// sandboxNote tells the agent why a sandboxed command may have failed.
+const sandboxNote = "Note: the sandbox may have blocked this command. Shell commands can only write to the project and temp folders"
+
+// addSandboxNote appends sandboxNote to the output of a failed sandboxed
+// command that shows signs of hitting the sandbox.
+func addSandboxNote(policy *sandbox.Policy, output string, execErr error) string {
+	if !policy.Active() || shell.ExitCode(execErr) == 0 {
+		return output
+	}
+	if !strings.Contains(output, "Operation not permitted") && !strings.Contains(output, "sandbox: writing to") {
+		return output
+	}
+	if policy.Network {
+		return output + "\n\n" + sandboxNote + "."
+	}
+	return output + "\n\n" + sandboxNote + ", and the network is off."
 }
