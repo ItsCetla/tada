@@ -20,7 +20,10 @@ import (
 
 // reasonModified is shown for files that changed after the session last
 // wrote them.
-const reasonModified = "changed since Ta-Da last wrote it"
+const (
+	reasonModified = "changed since Ta-Da last wrote it"
+	reasonLinked   = "a folder on its path now links outside the project"
+)
 
 // fileStep is one planned file change.
 type fileStep struct {
@@ -115,6 +118,14 @@ func (s *Service) planFiles(ctx context.Context, sess session.Session, at placer
 			continue
 		}
 		if req.Scope == ScopeOutside && s.insideProject(sess, path) {
+			continue
+		}
+		if s.linksOutside(sess, path) {
+			// Writing here would follow the link out of the project, so
+			// skip it even when forced.
+			steps = append(steps, fileStep{change: FileChange{
+				Path: path, Op: OpRestore, Skipped: true, Reason: reasonLinked,
+			}})
 			continue
 		}
 		target, targetFirst := rs[0], true
@@ -259,6 +270,40 @@ func (s *Service) insideProject(sess session.Session, path string) bool {
 		}
 	}
 	return false
+}
+
+// linksOutside reports whether path sits under a project root by name, but
+// one of its folders is now a symlink that leads outside that root. Shell
+// commands can swap a folder for such a link after a file was recorded.
+func (s *Service) linksOutside(sess session.Session, path string) bool {
+	roots := []string{s.projectRoot}
+	if sess.WorkingDir != "" {
+		wd := sess.WorkingDir
+		if !filepath.IsAbs(wd) && s.projectRoot != "" {
+			wd = filepath.Join(s.projectRoot, wd)
+		}
+		roots = append(roots, wd)
+	}
+	if !filepath.IsAbs(path) && s.projectRoot != "" {
+		path = filepath.Join(s.projectRoot, path)
+	}
+	path = filepath.Clean(path)
+	dir := canonical(filepath.Dir(path))
+	for _, root := range roots {
+		if root == "" || !under(filepath.Clean(root), path) {
+			continue
+		}
+		if !under(canonical(root), dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// under reports whether p is root or inside it.
+func under(root, p string) bool {
+	rel, err := filepath.Rel(root, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // canonical resolves symlinks in p, or in its folder when p itself is gone.

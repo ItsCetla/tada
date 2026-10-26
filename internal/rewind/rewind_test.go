@@ -413,3 +413,23 @@ func TestTimeline(t *testing.T) {
 	}, turns[0])
 	require.Equal(t, Turn{Index: 2, MessageID: u2.ID, Prompt: "again", CreatedAt: 200}, turns[1])
 }
+
+func TestRewindSkipsPathsThatNowLinkOutside(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	s := e.session(t, "s")
+	outside := t.TempDir()
+	path := filepath.Join(e.root, "sub", "a.txt")
+
+	turn := e.msg(t, s.ID, message.User, 100, user("change it"))
+	e.at(t, 100)(e.history.Create(e.ctx, s.ID, path, "old"))
+	e.at(t, 100)(e.history.CreateVersion(e.ctx, s.ID, path, "new"))
+	// A later command swaps the folder for a link out of the project.
+	write(t, filepath.Join(outside, "a.txt"), "new")
+	require.NoError(t, os.Symlink(outside, filepath.Join(e.root, "sub")))
+
+	res, err := e.svc.Rewind(e.ctx, s.ID, Request{MessageID: turn.ID, Mode: ModeFiles, Force: true})
+	require.NoError(t, err)
+	require.Equal(t, []FileChange{{Path: path, Op: OpRestore, Skipped: true, Reason: reasonLinked}}, res.Files)
+	require.Equal(t, "new", read(t, filepath.Join(outside, "a.txt")))
+}
