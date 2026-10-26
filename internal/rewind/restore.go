@@ -2,6 +2,7 @@ package rewind
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -29,6 +30,12 @@ const (
 type fileStep struct {
 	change  FileChange
 	content string
+	// root is the project folder the file sits under by name, if any.
+	// Writes there go through os.Root, so a folder swapped for a link
+	// after planning still can't lead them outside.
+	root string
+	// project is set when root is the project root.
+	project bool
 }
 
 // Rewind turns the session back to just before the turn that starts with
@@ -139,6 +146,7 @@ func (s *Service) planFiles(ctx context.Context, sess session.Session, at placer
 		lastExists := existed(last, len(rs) == 1)
 
 		st := fileStep{change: FileChange{Path: path, Op: OpRestore}, content: target.Content}
+		st.root, st.project = s.rootFor(sess, path)
 		if !wantExists {
 			st.change.Op = OpDelete
 		}
@@ -184,14 +192,14 @@ func (s *Service) applyFile(ctx context.Context, sessionID string, st fileStep) 
 	path := st.change.Path
 	switch st.change.Op {
 	case OpDelete:
-		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := s.removeFile(st); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 		if _, err := s.history.CreateAbsent(ctx, sessionID, path); err != nil {
 			slog.Warn("Failed to record rewound file", "path", path, "error", err)
 		}
 	default:
-		if err := writeFileAtomic(path, []byte(st.content)); err != nil {
+		if err := s.writeFile(st); err != nil {
 			return err
 		}
 		if _, err := s.history.CreateVersion(ctx, sessionID, path, st.content); err != nil {
@@ -209,6 +217,85 @@ func (s *Service) applyFile(ctx context.Context, sessionID string, st fileStep) 
 		slog.Warn("Failed to clear file read", "path", path, "error", err)
 	}
 	return nil
+}
+
+// removeFile deletes the step's file, inside its root when it has one.
+func (s *Service) removeFile(st fileStep) error {
+	if st.root == "" {
+		return os.Remove(st.change.Path)
+	}
+	r, rel, err := s.openRoot(st)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	return r.Remove(rel)
+}
+
+// writeFile writes the step's content, inside its root when it has one.
+func (s *Service) writeFile(st fileStep) error {
+	if st.root == "" {
+		return writeFileAtomic(st.change.Path, []byte(st.content))
+	}
+	r, rel, err := s.openRoot(st)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	return writeInRoot(r, rel, []byte(st.content))
+}
+
+// openRoot opens the step's root and returns the file's path inside it.
+func (s *Service) openRoot(st fileStep) (*os.Root, string, error) {
+	rel, err := filepath.Rel(st.root, s.absPath(st.change.Path))
+	if err != nil {
+		return nil, "", err
+	}
+	r, err := os.OpenRoot(st.root)
+	if err != nil {
+		return nil, "", err
+	}
+	// os.Root guards only below the root, so make sure the project
+	// folder itself wasn't swapped for a link since startup.
+	if st.project && s.rootInfo != nil {
+		info, err := r.Stat(".")
+		if err != nil || !os.SameFile(info, s.rootInfo) {
+			r.Close()
+			return nil, "", errors.New("the project folder was moved or replaced")
+		}
+	}
+	return r, rel, nil
+}
+
+// writeInRoot is writeFileAtomic for a path inside r. os.Root refuses any
+// step that would follow a link out of r, at the moment of each call.
+func writeInRoot(r *os.Root, rel string, data []byte) error {
+	mode := fs.FileMode(0o644)
+	if info, err := r.Stat(rel); err == nil {
+		mode = info.Mode().Perm()
+	}
+	dir := filepath.Dir(rel)
+	if err := r.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	name := filepath.Join(dir, ".tada-rewind-"+rand.Text())
+	f, err := r.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer r.Remove(name) //nolint:errcheck
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chmod(mode); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return r.Rename(name, rel)
 }
 
 // writeFileAtomic writes data next to path and renames it into place,
@@ -242,9 +329,8 @@ func writeFileAtomic(path string, data []byte) error {
 	return os.Rename(name, path)
 }
 
-// insideProject reports whether path is under the session's working folder
-// or the project root.
-func (s *Service) insideProject(sess session.Session, path string) bool {
+// roots returns the project root and the session's working folder.
+func (s *Service) roots(sess session.Session) []string {
 	roots := []string{s.projectRoot}
 	if sess.WorkingDir != "" {
 		wd := sess.WorkingDir
@@ -253,6 +339,39 @@ func (s *Service) insideProject(sess session.Session, path string) bool {
 		}
 		roots = append(roots, wd)
 	}
+	return roots
+}
+
+// absPath makes a stored path absolute against the project root.
+func (s *Service) absPath(path string) string {
+	if !filepath.IsAbs(path) && s.projectRoot != "" {
+		path = filepath.Join(s.projectRoot, path)
+	}
+	return filepath.Clean(path)
+}
+
+// rootFor returns the root that path sits under by name, either as given
+// or with links resolved, or "". project reports whether it is the
+// project root.
+func (s *Service) rootFor(sess session.Session, path string) (root string, project bool) {
+	path = s.absPath(path)
+	for i, r := range s.roots(sess) {
+		if r == "" {
+			continue
+		}
+		for _, form := range []string{filepath.Clean(r), canonical(r)} {
+			if under(form, path) {
+				return form, i == 0
+			}
+		}
+	}
+	return "", false
+}
+
+// insideProject reports whether path is under the session's working folder
+// or the project root.
+func (s *Service) insideProject(sess session.Session, path string) bool {
+	roots := s.roots(sess)
 	if !filepath.IsAbs(path) && s.projectRoot != "" {
 		path = filepath.Join(s.projectRoot, path)
 	}
@@ -276,21 +395,14 @@ func (s *Service) insideProject(sess session.Session, path string) bool {
 // one of its folders is now a symlink that leads outside that root. Shell
 // commands can swap a folder for such a link after a file was recorded.
 func (s *Service) linksOutside(sess session.Session, path string) bool {
-	roots := []string{s.projectRoot}
-	if sess.WorkingDir != "" {
-		wd := sess.WorkingDir
-		if !filepath.IsAbs(wd) && s.projectRoot != "" {
-			wd = filepath.Join(s.projectRoot, wd)
-		}
-		roots = append(roots, wd)
-	}
+	roots := s.roots(sess)
 	if !filepath.IsAbs(path) && s.projectRoot != "" {
 		path = filepath.Join(s.projectRoot, path)
 	}
 	path = filepath.Clean(path)
 	dir := canonical(filepath.Dir(path))
 	for _, root := range roots {
-		if root == "" || !under(filepath.Clean(root), path) {
+		if root == "" || (!under(filepath.Clean(root), path) && !under(canonical(root), path)) {
 			continue
 		}
 		if !under(canonical(root), dir) {
@@ -306,16 +418,23 @@ func under(root, p string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// canonical resolves symlinks in p, or in its folder when p itself is gone.
+// canonical resolves symlinks in p. When p doesn't exist it resolves the
+// deepest folder that does and adds the rest back, so a link higher up
+// still counts.
 func canonical(p string) string {
 	p = filepath.Clean(p)
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return r
+	tail := ""
+	for {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(r, tail)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return filepath.Join(p, tail)
+		}
+		tail = filepath.Join(filepath.Base(p), tail)
+		p = parent
 	}
-	if r, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
-		return filepath.Join(r, filepath.Base(p))
-	}
-	return p
 }
 
 // trimChat deletes msgs[idx:] and everything that hangs off them.

@@ -20,6 +20,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/db"
@@ -166,9 +168,12 @@ type Service struct {
 	sessions    Sessions
 	history     History
 	projectRoot string
-	busy        func(string) bool
-	actions     func(context.Context) []permission.Action
-	storedPath  func(string) string
+	// rootInfo identifies the project folder as it was at startup, so a
+	// later swap of the folder for a link can be caught.
+	rootInfo   fs.FileInfo
+	busy       func(string) bool
+	actions    func(context.Context) []permission.Action
+	storedPath func(string) string
 }
 
 // New returns a Service.
@@ -186,6 +191,9 @@ func New(o Options) *Service {
 	}
 	if s.storedPath == nil {
 		s.storedPath = filetracker.StoredPath
+	}
+	if s.projectRoot != "" {
+		s.rootInfo, _ = os.Stat(s.projectRoot)
 	}
 	return s
 }

@@ -3,6 +3,7 @@ package rewind
 import (
 	"context"
 	"database/sql"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -34,6 +35,10 @@ func newEnv(t *testing.T) *env {
 	require.NoError(t, err)
 	t.Cleanup(func() { conn.Close() })
 	q := db.New(conn)
+	// Resolve links in the temp folder (macOS puts it behind /var), so
+	// path checks see the same form a real project root has.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	e := &env{
 		ctx:      t.Context(),
 		conn:     conn,
@@ -41,7 +46,7 @@ func newEnv(t *testing.T) *env {
 		sessions: session.NewService(q, conn),
 		messages: message.NewService(q, message.WithDebounce(0)),
 		history:  history.NewService(q, conn),
-		root:     t.TempDir(),
+		root:     root,
 		busy:     map[string]bool{},
 	}
 	e.svc = New(Options{
@@ -432,4 +437,75 @@ func TestRewindSkipsPathsThatNowLinkOutside(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []FileChange{{Path: path, Op: OpRestore, Skipped: true, Reason: reasonLinked}}, res.Files)
 	require.Equal(t, "new", read(t, filepath.Join(outside, "a.txt")))
+}
+
+func TestRewindSkipsDeepPathsUnderALinkOutside(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	s := e.session(t, "s")
+	outside := t.TempDir()
+	path := filepath.Join(e.root, "sub", "x", "y", "a.txt")
+
+	turn := e.msg(t, s.ID, message.User, 100, user("change it"))
+	e.at(t, 100)(e.history.Create(e.ctx, s.ID, path, "old"))
+	e.at(t, 100)(e.history.CreateVersion(e.ctx, s.ID, path, "new"))
+	// The link's target has none of the lower folders yet.
+	require.NoError(t, os.Symlink(outside, filepath.Join(e.root, "sub")))
+
+	res, err := e.svc.Rewind(e.ctx, s.ID, Request{MessageID: turn.ID, Mode: ModeFiles, Force: true})
+	require.NoError(t, err)
+	require.Len(t, res.Files, 1)
+	require.Equal(t, reasonLinked, res.Files[0].Reason)
+	_, err = os.Stat(filepath.Join(outside, "x"))
+	require.ErrorIs(t, err, fs.ErrNotExist)
+}
+
+func TestApplyFileRefusesLinkSwappedInAfterPlanning(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	s := e.session(t, "s")
+	outside := t.TempDir()
+	path := filepath.Join(e.root, "sub", "a.txt")
+	write(t, filepath.Join(outside, "a.txt"), "keep")
+
+	st := fileStep{change: FileChange{Path: path, Op: OpRestore}, content: "old", root: e.root}
+	// The folder becomes a link between planning and writing.
+	require.NoError(t, os.Symlink(outside, filepath.Join(e.root, "sub")))
+	require.Error(t, e.svc.applyFile(e.ctx, s.ID, st))
+	require.Equal(t, "keep", read(t, filepath.Join(outside, "a.txt")))
+
+	st.change.Op = OpDelete
+	require.Error(t, e.svc.applyFile(e.ctx, s.ID, st))
+	require.Equal(t, "keep", read(t, filepath.Join(outside, "a.txt")))
+}
+
+func TestApplyFileRefusesSwappedProjectFolder(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	s := e.session(t, "s")
+	outside := t.TempDir()
+	path := filepath.Join(e.root, "a.txt")
+	write(t, filepath.Join(outside, "a.txt"), "keep")
+
+	st := fileStep{change: FileChange{Path: path, Op: OpRestore}, content: "old"}
+	st.root, st.project = e.svc.rootFor(s, path)
+	require.True(t, st.project)
+	// The project folder itself becomes a link out.
+	require.NoError(t, os.Rename(e.root, e.root+".old"))
+	require.NoError(t, os.Symlink(outside, e.root))
+	require.Error(t, e.svc.applyFile(e.ctx, s.ID, st))
+	require.Equal(t, "keep", read(t, filepath.Join(outside, "a.txt")))
+}
+
+func TestRootForMatchesResolvedProjectPath(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	s := e.session(t, "s")
+	link := filepath.Join(t.TempDir(), "proj")
+	require.NoError(t, os.Symlink(e.root, link))
+	svc := New(Options{DB: e.conn, Messages: e.messages, Sessions: e.sessions, History: e.history, ProjectRoot: link})
+
+	root, project := svc.rootFor(s, filepath.Join(e.root, "a.txt"))
+	require.Equal(t, e.root, root)
+	require.True(t, project)
 }
