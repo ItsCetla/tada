@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/google/uuid"
@@ -55,9 +56,11 @@ func (s *Service) Fork(ctx context.Context, sessionID, atMessageID string) (sess
 	for _, m := range msgs[:cut] {
 		keep[m.ID] = true
 	}
-	// Versions and reads stamped before the first message left out belong
-	// to the copied part. Same-second ties go to the part left out, like
-	// rewind does.
+	// Versions and reads recorded before the first message left out belong
+	// to the copied part. Versions are placed by the message that wrote
+	// them when known; otherwise, as for reads, same-second ties go to the
+	// part left out, like rewind does.
+	at := newPlacer(msgs)
 	boundary := int64(-1)
 	if cut < len(msgs) {
 		boundary = msgs[cut].CreatedAt
@@ -92,11 +95,13 @@ func (s *Service) Fork(ctx context.Context, sessionID, atMessageID string) (sess
 		return session.Session{}, fmt.Errorf("listing messages: %w", err)
 	}
 	var summary string
+	newIDs := make(map[string]string, cut)
 	for _, r := range rows {
 		if !keep[r.ID] {
 			continue
 		}
 		id := uuid.New().String()
+		newIDs[r.ID] = id
 		if err := q.InsertMessageCopy(ctx, db.InsertMessageCopyParams{
 			ID:                      id,
 			SessionID:               newID,
@@ -125,9 +130,10 @@ func (s *Service) Fork(ctx context.Context, sessionID, atMessageID string) (sess
 		return session.Session{}, fmt.Errorf("listing file history: %w", err)
 	}
 	for _, f := range files {
-		if !before(f.CreatedAt) {
+		if !at.before(history.FromDB(f), cut) {
 			continue
 		}
+		msgID := newIDs[f.MessageID.String]
 		if err := q.InsertFileCopy(ctx, db.InsertFileCopyParams{
 			ID:        uuid.New().String(),
 			SessionID: newID,
@@ -135,6 +141,7 @@ func (s *Service) Fork(ctx context.Context, sessionID, atMessageID string) (sess
 			Content:   f.Content,
 			Version:   f.Version,
 			IsNew:     f.IsNew,
+			MessageID: sql.NullString{String: msgID, Valid: msgID != ""},
 			CreatedAt: f.CreatedAt,
 			UpdatedAt: f.UpdatedAt,
 		}); err != nil {

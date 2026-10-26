@@ -93,6 +93,14 @@ func (m *mockHistoryService) DeleteSessionFiles(ctx context.Context, sessionID s
 	return nil
 }
 
+func (m *mockHistoryService) Mark(ctx context.Context) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockHistoryService) ListPathSince(ctx context.Context, path string, mark int64) ([]history.File, error) {
+	return nil, nil
+}
+
 func TestApplyEditToContentPartialSuccess(t *testing.T) {
 	t.Parallel()
 

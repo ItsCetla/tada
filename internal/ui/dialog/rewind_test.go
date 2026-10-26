@@ -54,7 +54,7 @@ func TestRewind_PreselectsAndRenders(t *testing.T) {
 	require.Contains(t, out, "fix the build")
 	require.Contains(t, out, "$ shell")
 	require.Contains(t, out, "main.go, /etc/hosts")
-	require.Contains(t, out, "whatever they changed stays")
+	require.Contains(t, out, "some of their changes may not be undone")
 	for _, l := range splitLines(out) {
 		require.LessOrEqual(t, ansi.StringWidth(l), 88, l)
 	}

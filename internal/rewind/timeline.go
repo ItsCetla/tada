@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"math"
 	"slices"
 
 	"github.com/charmbracelet/crush/internal/history"
@@ -39,13 +38,12 @@ func (s *Service) Timeline(ctx context.Context, sessionID string) ([]Turn, error
 	}
 
 	starts := turnStarts(msgs)
+	at := newPlacer(msgs)
 	turns := make([]Turn, 0, len(starts))
 	for i, start := range starts {
 		end := len(msgs)
-		hi := int64(math.MaxInt64)
 		if i+1 < len(starts) {
 			end = starts[i+1]
-			hi = msgs[end].CreatedAt
 		}
 		first := msgs[start]
 		t := Turn{
@@ -53,7 +51,7 @@ func (s *Service) Timeline(ctx context.Context, sessionID string) ([]Turn, error
 			MessageID: first.ID,
 			Prompt:    promptOf(first),
 			CreatedAt: first.CreatedAt,
-			Files:     changedBetween(files, first.CreatedAt, hi),
+			Files:     changedBetween(files, at, start, end),
 		}
 		for _, m := range msgs[start:end] {
 			if m.HasShellCommand() {
@@ -90,17 +88,46 @@ func turnStarts(msgs []message.Message) []int {
 	return out
 }
 
-// changedBetween returns the sorted paths with a version recorded in
-// [lo, hi).
-func changedBetween(files []history.File, lo, hi int64) []string {
+// changedBetween returns the sorted paths with a version recorded from
+// msgs[lo] up to, not including, msgs[hi].
+func changedBetween(files []history.File, at placer, lo, hi int) []string {
 	var out []string
 	for _, f := range files {
-		if f.CreatedAt >= lo && f.CreatedAt < hi {
+		if !at.before(f, lo) && at.before(f, hi) {
 			out = append(out, f.Path)
 		}
 	}
 	slices.Sort(out)
 	return slices.Compact(out)
+}
+
+// placer puts history versions in the chat.
+type placer struct {
+	msgs []message.Message
+	pos  map[string]int
+}
+
+func newPlacer(msgs []message.Message) placer {
+	pos := make(map[string]int, len(msgs))
+	for i, m := range msgs {
+		pos[m.ID] = i
+	}
+	return placer{msgs: msgs, pos: pos}
+}
+
+// before reports whether f was recorded before msgs[i]; every version is
+// before len(msgs). A version stamped with the message whose tool call
+// wrote it is placed at that message. Older versions, and those whose
+// message is gone, fall back to their timestamp, which only has second
+// resolution: a tie goes to the later message.
+func (p placer) before(f history.File, i int) bool {
+	if i >= len(p.msgs) {
+		return true
+	}
+	if j, ok := p.pos[f.MessageID]; ok && f.MessageID != "" {
+		return j < i
+	}
+	return f.CreatedAt < p.msgs[i].CreatedAt
 }
 
 // byPath groups a session's versions by path, each group oldest first.

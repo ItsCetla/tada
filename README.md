@@ -1147,10 +1147,18 @@ unless you press `!`. With chat included, the turn's messages are removed
 and its prompt goes back into the editor so you can change it and send it
 again. Rewinding waits until the agent is idle.
 
-Only edits made through Ta-Da's file tools (`edit`, `multiedit`, `write`
-and the LSP rename tools) can be rewound. Whatever a shell command changed,
-such as `rm`, a branch switch or a code generator, stays as it is; the
-timeline marks turns that ran shell commands so you know to check.
+Edits made through Ta-Da's file tools (`edit`, `multiedit`, `write` and
+the LSP rename tools) can be rewound, and so can text files changed by a
+foreground bash command, such as `rm`, `sed -i` or a code generator. Ta-Da
+takes a hidden git snapshot of the working directory (in its data
+directory, never your own repository) before and after each such command
+and records the difference. A command's result says which changed files it
+couldn't record: binary files, files over 1 MiB, symlinks and the like.
+Background jobs, gitignored files, files outside the working directory and
+nested repositories aren't covered, and nothing is recorded when `git`
+isn't installed. Edits you make yourself while an agent's shell command
+is running are recorded as the command's, so rewinding it undoes them too.
+The timeline marks turns that ran shell commands so you know to check.
 
 ### Fork
 

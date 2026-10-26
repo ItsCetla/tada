@@ -313,8 +313,9 @@ func (d *Rewind) HandleMsg(msg tea.Msg) Action {
 func (d *Rewind) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	t := d.com.Styles
 	d.width = max(0, min(88, area.Dx()-t.Dialog.View.GetHorizontalBorderSize()))
-	// Title, switches, footer, help and the frame take about nine rows.
-	d.height = max(8, min(24, area.Dy()-9))
+	// Title, switches, the two-line footer, help and the frame take about
+	// ten rows.
+	d.height = max(8, min(24, area.Dy()-10))
 	DrawCenter(scr, area, d.content(time.Now()))
 	return nil
 }
@@ -370,9 +371,14 @@ func (d *Rewind) content(now time.Time) string {
 	case d.armed:
 		foot = t.Control.Alert.Render("Press enter again to rewind. This can't be undone; esc to back out.")
 	default:
-		foot = t.Control.Muted.Render("Shell command changes aren't tracked and won't be undone.")
+		foot = t.Control.Muted.Render("Not undone: background jobs; binary, large, gitignored or out-of-project files.") + "\n" +
+			t.Control.Muted.Render("Edits you make while an agent shell command runs may be undone with it.")
 	}
-	rc.AddPart(pad.Render(ansi.Truncate(foot, width, "…")))
+	lines := strings.Split(foot, "\n")
+	for i, l := range lines {
+		lines[i] = pad.Render(ansi.Truncate(l, width, "…"))
+	}
+	rc.AddPart(strings.Join(lines, "\n"))
 	rc.Help = renderDialogHelp(t, &d.help, d, inner)
 	return rc.Render()
 }
@@ -465,7 +471,7 @@ func (d *Rewind) detail(t *styles.Styles, width int) []string {
 		out = append(out, t.Control.Label.Render("Actions: ")+m.Render(a))
 	}
 	if turn.Bash {
-		out = append(out, t.Control.Warn.Render("Ran shell commands; whatever they changed stays as it is."))
+		out = append(out, t.Control.Warn.Render("Ran shell commands; some of their changes may not be undone."))
 	}
 	out = append(out, "",
 		m.Render(fmt.Sprintf("enter to rewind to just before turn %d.", turn.Index)),
@@ -503,7 +509,7 @@ func (d *Rewind) planLines(t *styles.Styles, turn rewind.Turn) []string {
 		out = append(out, m.Render(fmt.Sprintf("Removes %d messages from the chat; the prompt goes back in the editor.", p.MessagesDeleted)))
 	}
 	if d.shellSince() && d.mode != rewind.ModeChat {
-		out = append(out, t.Control.Warn.Render("Shell command changes in these turns won't be undone."))
+		out = append(out, t.Control.Warn.Render("Shell commands ran in these turns; some of their changes may not be undone."))
 	}
 	return out
 }

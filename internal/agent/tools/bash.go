@@ -18,8 +18,10 @@ import (
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/fsext"
+	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/shell"
+	"github.com/charmbracelet/crush/internal/snapshot"
 	"github.com/charmbracelet/crush/internal/workdir"
 )
 
@@ -206,11 +208,14 @@ func blockFuncs() []shell.BlockFunc {
 	}
 }
 
-func NewBashTool(permissions permission.Service, workingDir, spillDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
+// NewBashTool returns the bash tool. dataDir is Ta-Da's data directory:
+// oversized output spills there, and when files is not nil it holds the
+// snapshots that record foreground commands' file changes for rewind.
+func NewBashTool(permissions permission.Service, files history.Service, workingDir, dataDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		BashToolName,
 		string(bashDescription(attribution, modelID)),
-		func(ctx context.Context, params BashParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
+		func(ctx context.Context, params BashParams, call fantasy.ToolCall) (resp fantasy.ToolResponse, err error) {
 			workingDir := workdir.From(ctx, workingDir)
 			if params.Command == "" {
 				return fantasy.NewTextErrorResponse("missing command"), nil
@@ -283,7 +288,7 @@ func NewBashTool(permissions permission.Service, workingDir, spillDir string, at
 						return fantasy.ToolResponse{}, fmt.Errorf("[Job %s] error executing command: %w", bgShell.ID, execErr)
 					}
 
-					stdout = formatOutput(stdout, stderr, execErr, spillDir)
+					stdout = formatOutput(stdout, stderr, execErr, dataDir)
 
 					metadata := BashResponseMetadata{
 						StartTime:        startTime.UnixMilli(),
@@ -314,6 +319,29 @@ func NewBashTool(permissions permission.Service, workingDir, spillDir string, at
 				}
 				response := fmt.Sprintf("Background shell started with ID: %s\n\nUse job_output tool to view output or job_kill to terminate.", bgShell.ID)
 				return fantasy.WithResponseMetadata(fantasy.NewTextResponse(response), metadata), nil
+			}
+
+			// Record the files a foreground command changes so rewind can
+			// undo them. The snapshot is fresh for each command, so changes
+			// made between commands aren't pinned on this one. Explicit
+			// background jobs above aren't covered: they can run for hours
+			// alongside the user's own edits. A command moved to the
+			// background below is covered up to when the tool returns.
+			if !isSafeReadOnly {
+				if run := snapshot.Begin(ctx, files, dataDir, workingDir, sessionID); run != nil {
+					// Only the project folder is snapshotted, so say when a
+					// command runs elsewhere. Read-only ones change nothing.
+					outside := !insideDir(execWorkingDir, workingDir) && !isSafeReadOnlyCommand(params.Command)
+					defer func() {
+						note := run.Finish(ctx)
+						if outside {
+							note = strings.TrimSpace(outsideNote + "\n" + note)
+						}
+						if note != "" && err == nil {
+							resp.Content += "\n\n" + note
+						}
+					}()
+				}
 			}
 
 			// Start synchronous execution with auto-background support
@@ -370,7 +398,7 @@ func NewBashTool(permissions permission.Service, workingDir, spillDir string, at
 					return fantasy.ToolResponse{}, fmt.Errorf("[Job %s] error executing command: %w", bgShell.ID, execErr)
 				}
 
-				stdout = formatOutput(stdout, stderr, execErr, spillDir)
+				stdout = formatOutput(stdout, stderr, execErr, dataDir)
 
 				metadata := BashResponseMetadata{
 					StartTime:        startTime.UnixMilli(),
@@ -474,4 +502,22 @@ func normalizeWorkingDir(path string) string {
 		path = strings.ReplaceAll(path, fsext.WindowsWorkingDirDrive(), "")
 	}
 	return filepath.ToSlash(path)
+}
+
+// outsideNote tells the agent rewind can't undo what a command did outside
+// the project folder.
+const outsideNote = "Note: this command ran outside the project folder; rewind only records file changes inside it."
+
+// insideDir reports whether dir is root or inside it. A relative dir is
+// taken relative to root.
+func insideDir(dir, root string) bool {
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(root, dir)
+	}
+	if fsext.HasPrefix(dir, root) {
+		return true
+	}
+	realDir, errDir := filepath.EvalSymlinks(dir)
+	realRoot, errRoot := filepath.EvalSymlinks(root)
+	return errDir == nil && errRoot == nil && fsext.HasPrefix(realDir, realRoot)
 }

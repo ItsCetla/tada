@@ -7,6 +7,20 @@ listed; see the [upstream releases](https://github.com/charmbracelet/crush/relea
 
 ## [Unreleased]
 
+### Added
+
+- **Rewind undoes file changes made by bash commands.** Ta-Da takes a
+  hidden git snapshot of the working directory before and after each
+  foreground bash command and records the text files it changed, so
+  rewinding a turn restores or deletes them like edits made with the file
+  tools. Binary files, files over 1 MiB and non-regular files are named in
+  the command's result instead. Background jobs, gitignored files and
+  nested repositories aren't covered, and nothing is recorded without
+  `git`, in your home folder or a folder with more than 50,000 files, or
+  while another session runs a command in the same folder; the command's
+  result says when a change wasn't recorded. Edits you make yourself while
+  an agent's shell command runs may be undone along with it.
+
 ## [0.6.2] - 2026-10-23
 
 ### Security

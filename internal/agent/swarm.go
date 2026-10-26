@@ -191,7 +191,7 @@ func (c *coordinator) swarmTools(coder config.Agent, dir, modelID string) []fant
 	dataDir := cfg.Options.DataDirectory
 	shell.SetScrubbedEnvVars(cfg.APIKeyEnvVars())
 	all := []fantasy.AgentTool{
-		tools.NewBashTool(c.permissions, dir, dataDir, cfg.Options.Attribution, modelID),
+		tools.NewBashTool(c.permissions, c.history, dir, dataDir, cfg.Options.Attribution, modelID),
 		tools.NewEditTool(c.lspManager, c.permissions, c.history, c.filetracker, dir),
 		tools.NewGlobTool(dir, cfg.Tools.Glob),
 		tools.NewGrepTool(dir, cfg.Tools.Grep),

@@ -61,7 +61,7 @@ func (s *Service) Rewind(ctx context.Context, sessionID string, req Request) (Re
 
 	var res Result
 	if req.Mode != ModeChat {
-		steps, err := s.planFiles(ctx, sess, anchor.CreatedAt, req)
+		steps, err := s.planFiles(ctx, sess, newPlacer(msgs), idx, req)
 		if err != nil {
 			return Result{}, err
 		}
@@ -88,14 +88,15 @@ func (s *Service) Rewind(ctx context.Context, sessionID string, req Request) (Re
 	return res, nil
 }
 
-// planFiles works out what each file the session changed at or after start
-// should go back to.
+// planFiles works out what each file the session changed at or after
+// msgs[start] should go back to.
 //
 // The target is the session's newest version recorded before start. When
 // there is none, the session's first version is the state before its first
-// change. Versions only have second resolution, so a change made in the
-// same second as the prompt counts as part of the turn.
-func (s *Service) planFiles(ctx context.Context, sess session.Session, start int64, req Request) ([]fileStep, error) {
+// change. Versions are placed by the message that wrote them; older ones
+// only have second resolution, so a change made in the same second as the
+// prompt counts as part of the turn.
+func (s *Service) planFiles(ctx context.Context, sess session.Session, at placer, start int, req Request) ([]fileStep, error) {
 	files, err := s.history.ListBySession(ctx, sess.ID)
 	if err != nil {
 		return nil, fmt.Errorf("listing file history: %w", err)
@@ -110,7 +111,7 @@ func (s *Service) planFiles(ctx context.Context, sess session.Session, start int
 	var steps []fileStep
 	for _, path := range paths {
 		rs := groups[path]
-		if !slices.ContainsFunc(rs, func(f history.File) bool { return f.CreatedAt >= start }) {
+		if !slices.ContainsFunc(rs, func(f history.File) bool { return !at.before(f, start) }) {
 			continue
 		}
 		if req.Scope == ScopeOutside && s.insideProject(sess, path) {
@@ -118,7 +119,7 @@ func (s *Service) planFiles(ctx context.Context, sess session.Session, start int
 		}
 		target, targetFirst := rs[0], true
 		for i, f := range rs {
-			if f.CreatedAt < start {
+			if at.before(f, start) {
 				target, targetFirst = f, i == 0
 			}
 		}

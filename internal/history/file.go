@@ -37,8 +37,24 @@ type File struct {
 	Content   string
 	Version   int64
 	Origin    Origin
+	// MessageID is the assistant message whose tool call wrote the
+	// version, or "" when unknown.
+	MessageID string
 	CreatedAt int64
 	UpdatedAt int64
+}
+
+type messageIDKey struct{}
+
+// WithMessageID returns a context whose history writes are stamped with
+// the assistant message id, so rewind can tell which turn wrote them.
+func WithMessageID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, messageIDKey{}, id)
+}
+
+func messageIDFrom(ctx context.Context) sql.NullString {
+	id, _ := ctx.Value(messageIDKey{}).(string)
+	return sql.NullString{String: id, Valid: id != ""}
 }
 
 // Service manages file versions and history for sessions.
@@ -63,6 +79,13 @@ type Service interface {
 	ListLatestSessionFiles(ctx context.Context, sessionID string) ([]File, error)
 	Delete(ctx context.Context, id string) error
 	DeleteSessionFiles(ctx context.Context, sessionID string) error
+
+	// Mark returns a marker for the newest version recorded so far, in
+	// any session.
+	Mark(ctx context.Context) (int64, error)
+	// ListPathSince lists path's versions, from any session, recorded
+	// after mark, oldest first.
+	ListPathSince(ctx context.Context, path string, mark int64) ([]File, error)
 }
 
 type service struct {
@@ -155,6 +178,7 @@ func (s *service) createWithVersion(ctx context.Context, sessionID, path, conten
 			Content:   content,
 			Version:   version,
 			IsNew:     originToDB(origin),
+			MessageID: messageIDFrom(ctx),
 		})
 		if txErr != nil {
 			// Rollback the transaction
@@ -254,6 +278,22 @@ func (s *service) DeleteSessionFiles(ctx context.Context, sessionID string) erro
 	return nil
 }
 
+func (s *service) Mark(ctx context.Context) (int64, error) {
+	return s.q.MaxFileRowID(ctx)
+}
+
+func (s *service) ListPathSince(ctx context.Context, path string, mark int64) ([]File, error) {
+	rows, err := s.q.ListFilesByPathAfterRowID(ctx, path, mark)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]File, len(rows))
+	for i, r := range rows {
+		files[i] = s.fromDBItem(r)
+	}
+	return files, nil
+}
+
 func (s *service) fromDBItem(item db.File) File {
 	return FromDB(item)
 }
@@ -267,6 +307,7 @@ func FromDB(item db.File) File {
 		Content:   item.Content,
 		Version:   item.Version,
 		Origin:    originFromDB(item.IsNew),
+		MessageID: item.MessageID.String,
 		CreatedAt: item.CreatedAt,
 		UpdatedAt: item.UpdatedAt,
 	}

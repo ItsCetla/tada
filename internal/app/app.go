@@ -39,6 +39,7 @@ import (
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
+	"github.com/charmbracelet/crush/internal/snapshot"
 	"github.com/charmbracelet/crush/internal/swarm"
 	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/styles"
@@ -205,6 +206,10 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	// Release the shared database connection on shutdown. The pool
 	// closes the underlying *sql.DB when the last reference is released.
 	dataDir := cfg.Options.DataDirectory
+
+	// Index the folder for shell change recording now, so the first bash
+	// command doesn't wait for it. Shutdown waits for this.
+	snapshot.Warm(files, dataDir, store.WorkingDir())
 	app.cleanupFuncs = append(
 		app.cleanupFuncs,
 		func(context.Context) error { return db.Release(dataDir) },
@@ -971,6 +976,11 @@ func (app *App) Shutdown() {
 			slog.Error("Failed to stop swarm agents", "error", err)
 		}
 	}
+
+	// Let shell change recording finish indexing and pruning, so git
+	// isn't still writing to the data directory after exit; git still
+	// running when shutdownCtx ends is killed.
+	snapshot.Shutdown(shutdownCtx)
 
 	// Drain any debounced message updates before the DB-close cleanup
 	// runs in the parallel block below. message.Service buffers

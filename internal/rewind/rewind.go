@@ -1,7 +1,19 @@
 // Package rewind turns a session back to an earlier turn. It restores the
-// files the agent changed from the recorded file history, trims the chat,
-// or both. Changes made by shell commands are not recorded, so they can't
-// be undone here.
+// files the agent changed from the recorded file history, trims the chat, or
+// both. Foreground bash commands are recorded too, by diffing hidden git
+// snapshots taken before and after each one (see internal/snapshot). Not
+// recorded: explicit background jobs, changes an auto-backgrounded command
+// makes after the tool returns, binary, over-1 MiB and non-regular files (the
+// tool result names them), files over 16 MiB (left out silently), gitignored
+// files, files outside the working directory or in nested repositories,
+// read-only commands, and everything when git is missing or keeps failing,
+// the folder is the home folder, the file system root or holds more than
+// 50,000 files, or another session runs a command in the same folder at the
+// same time. Parallel bash calls in one session may attribute each other's
+// changes, and edits the user makes while a command runs are taken for the
+// command's, so rewinding it undoes them too. Turns are matched by the assistant message that wrote each
+// version, falling back to timestamps for older rows. Each skipped command's
+// tool result says why.
 package rewind
 
 import (
@@ -70,8 +82,8 @@ type Turn struct {
 	Files []string `json:"files,omitempty"`
 	// Actions counts the turn's tool actions by permission class.
 	Actions map[permission.Class]int `json:"actions,omitempty"`
-	// Bash reports that a shell command ran during the turn. Its changes
-	// aren't tracked.
+	// Bash reports that a shell command ran during the turn. Only some of
+	// its changes are recorded.
 	Bash bool `json:"bash,omitempty"`
 }
 
