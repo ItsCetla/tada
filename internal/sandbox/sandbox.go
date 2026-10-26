@@ -296,12 +296,52 @@ func trustedGitDir(dir, gitDir string) bool {
 			filepathext.Canonical(strings.TrimSpace(string(b))) == filepathext.Canonical(filepath.Join(dir, ".git"))
 	default:
 		top, after, found := strings.Cut(real, modulesSep)
-		ok = found && after != "" && within(top, filepathext.Canonical(dir)) && isRepoDir(real)
+		ok = found && after != "" && within(top, filepathext.Canonical(dir)) && isRepoDir(real) &&
+			linksBack(real, dir)
 	}
 	if !ok {
 		slog.Warn("Sandbox not allowing writes to untrusted git folder", "dir", dir, "gitdir", gitDir)
 	}
 	return ok
+}
+
+// linksBack reports whether the submodule git folder gitDir names dir as
+// its work tree in core.worktree, the backlink git writes for submodules.
+func linksBack(gitDir, dir string) bool {
+	wt := coreWorktree(filepath.Join(gitDir, "config"))
+	if wt == "" {
+		return false
+	}
+	return filepathext.Canonical(filepathext.SmartJoin(gitDir, wt)) == filepathext.Canonical(dir)
+}
+
+// coreWorktree returns core.worktree from the git config file at path, or
+// "" if it is not set. It reads only plain [core] sections, which is all
+// git writes there for submodules.
+func coreWorktree(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	inCore := false
+	wt := ""
+	for line := range strings.Lines(string(b)) {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			inCore = strings.EqualFold(line, "[core]")
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !inCore || !ok || !strings.EqualFold(strings.TrimSpace(key), "worktree") {
+			continue
+		}
+		val = strings.TrimSpace(val)
+		if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+			val = val[1 : len(val)-1]
+		}
+		wt = val
+	}
+	return wt
 }
 
 // modulesSep is where git keeps submodules' git folders.

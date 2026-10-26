@@ -25,6 +25,13 @@ func writeDotGit(t *testing.T, dir, target string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: "+target+"\n"), 0o644))
 }
 
+// writeWorktree sets core.worktree in the git folder's config.
+func writeWorktree(t *testing.T, gitDir, wt string) {
+	t.Helper()
+	cfg := "[core]\n\tbare = false\n\tworktree = \"" + wt + "\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(gitDir, "config"), []byte(cfg), 0o644))
+}
+
 func canon(paths []string) []string {
 	out := make([]string, len(paths))
 	for i, p := range paths {
@@ -73,12 +80,14 @@ func TestGitDirs_SubmoduleNeedsRepoLayout(t *testing.T) {
 	require.Empty(t, writable, "no HEAD or objects")
 
 	fakeRepo(t, mod)
+	writeWorktree(t, mod, "../../../sub")
 	_, writable = gitDirs(proj)
 	require.Equal(t, []string{filepathext.Canonical(mod)}, canon(writable))
 
 	// The same layout in another repo's .git/modules isn't trusted.
 	other := filepath.Join(t.TempDir(), ".git", "modules", "sub")
 	fakeRepo(t, other)
+	writeWorktree(t, other, proj)
 	writeDotGit(t, proj, other)
 	_, writable = gitDirs(proj)
 	require.Empty(t, writable)
@@ -159,4 +168,48 @@ func TestGitDirs_CommondirWithoutObjectsNotWritable(t *testing.T) {
 	fakeRepo(t, common)
 	_, writable = gitDirs(proj)
 	require.Equal(t, []string{wtGit, common}, canon(writable))
+}
+
+func TestGitDirs_RealSubmoduleWritable(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not available")
+	}
+	root := filepathext.Canonical(t.TempDir())
+	lib := filepath.Join(root, "lib")
+	top := filepath.Join(root, "top")
+	commit := []string{"-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "a"}
+	for _, args := range [][]string{
+		{"init", "-q", lib},
+		append([]string{"-C", lib}, commit...),
+		{"init", "-q", top},
+		{"-C", top, "-c", "protocol.file.allow=always", "submodule", "add", "-q", lib, "sub"},
+	} {
+		out, err := exec.CommandContext(t.Context(), "git", args...).CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	_, writable := gitDirs(filepath.Join(top, "sub"))
+	require.Equal(t, []string{filepath.Join(top, ".git", "modules", "sub")}, canon(writable))
+}
+
+func TestGitDirs_SiblingSubmoduleNeedsBacklink(t *testing.T) {
+	t.Parallel()
+	top := t.TempDir()
+	sibling := filepath.Join(top, ".git", "modules", "other")
+	fakeRepo(t, sibling)
+	proj := filepath.Join(top, "nested", "proj")
+	writeDotGit(t, proj, sibling)
+
+	_, writable := gitDirs(proj)
+	require.Empty(t, writable, "no core.worktree")
+
+	writeWorktree(t, sibling, "../../../other")
+	require.NoError(t, os.MkdirAll(filepath.Join(top, "other"), 0o755))
+	dirs, writable := gitDirs(proj)
+	require.Empty(t, writable, "core.worktree names the sibling")
+	require.Equal(t, []string{sibling}, dirs)
+
+	writeWorktree(t, sibling, "../../../nested/proj")
+	_, writable = gitDirs(proj)
+	require.Equal(t, []string{filepathext.Canonical(sibling)}, canon(writable))
 }
