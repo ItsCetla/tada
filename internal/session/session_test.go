@@ -151,6 +151,44 @@ func TestMCPServerDisabledRoundTrip(t *testing.T) {
 	require.Empty(t, enabled)
 }
 
+func TestSkillDisabledRoundTrip(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Cleanup(func() {
+		require.NoError(t, db.Release(dataDir))
+		db.ResetPool()
+	})
+
+	conn, err := db.Connect(t.Context(), dataDir)
+	require.NoError(t, err)
+
+	sessions := NewService(db.New(conn), conn)
+
+	disabled, err := sessions.SkillsDisabled(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, disabled, "a new repository must default to the config")
+
+	require.NoError(t, sessions.SetSkillDisabled(t.Context(), "jq", true))
+	require.NoError(t, sessions.SetSkillDisabled(t.Context(), "jq", true), "disabling twice must be idempotent")
+	disabled, err = sessions.SkillsDisabled(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []string{"jq"}, disabled)
+
+	// Enabling clears the disabled override and records an enabled one.
+	require.NoError(t, sessions.SetSkillDisabled(t.Context(), "jq", false))
+	disabled, err = sessions.SkillsDisabled(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, disabled)
+	enabled, err := sessions.SkillsEnabled(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []string{"jq"}, enabled)
+
+	// Disabling again clears the enabled override.
+	require.NoError(t, sessions.SetSkillDisabled(t.Context(), "jq", true))
+	enabled, err = sessions.SkillsEnabled(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, enabled)
+}
+
 func TestEstimatedUsageStateCanBeClearedByExplicitSave(t *testing.T) {
 	dataDir := t.TempDir()
 	t.Cleanup(func() {

@@ -16,7 +16,9 @@ type Querier interface {
 	DeleteFile(ctx context.Context, id string) error
 	DeleteFileRead(ctx context.Context, arg DeleteFileReadParams) error
 	DeleteMCPDisabledServer(ctx context.Context, name string) error
+	DeleteDisabledSkill(ctx context.Context, name string) error
 	DeleteMCPEnabledServer(ctx context.Context, name string) error
+	DeleteEnabledSkill(ctx context.Context, name string) error
 	DeleteMessage(ctx context.Context, id string) error
 	DeleteSession(ctx context.Context, id string) error
 	DeleteSessionFiles(ctx context.Context, sessionID string) error
@@ -42,7 +44,9 @@ type Querier interface {
 	InsertFileCopy(ctx context.Context, arg InsertFileCopyParams) error
 	InsertFileRead(ctx context.Context, arg InsertFileReadParams) error
 	InsertMCPDisabledServer(ctx context.Context, name string) error
+	InsertDisabledSkill(ctx context.Context, name string) error
 	InsertMCPEnabledServer(ctx context.Context, name string) error
+	InsertEnabledSkill(ctx context.Context, name string) error
 	// Copies a message into another session (fork) with its timestamps intact.
 	InsertMessageCopy(ctx context.Context, arg InsertMessageCopyParams) error
 	// Backs prompt history when no session is open. Needs
@@ -56,7 +60,9 @@ type Querier interface {
 	// version is its latest.
 	ListLatestSessionFiles(ctx context.Context, sessionID string) ([]File, error)
 	ListMCPDisabledServers(ctx context.Context) ([]string, error)
+	ListDisabledSkills(ctx context.Context) ([]string, error)
 	ListMCPEnabledServers(ctx context.Context) ([]string, error)
+	ListEnabledSkills(ctx context.Context) ([]string, error)
 	// created_at has one-second resolution, so rowid breaks ties in insertion
 	// order; rewind cuts the list by position and relies on it being stable.
 	ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
@@ -74,6 +80,9 @@ type Querier interface {
 	SetSessionChannel(ctx context.Context, arg SetSessionChannelParams) (Session, error)
 	SetSessionWorkingDir(ctx context.Context, arg SetSessionWorkingDirParams) (Session, error)
 	UpdateMessage(ctx context.Context, arg UpdateMessageParams) error
+	// Moves a message in the session order; compaction uses it to place a
+	// summary right before the messages it keeps verbatim.
+	UpdateMessageCreatedAt(ctx context.Context, arg UpdateMessageCreatedAtParams) error
 	UpdateSession(ctx context.Context, arg UpdateSessionParams) (Session, error)
 	UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSessionTitleAndUsageParams) error
 }

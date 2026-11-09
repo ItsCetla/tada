@@ -11,6 +11,7 @@ import (
 	"strings"
 	"text/template"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/filepathext"
@@ -41,7 +42,6 @@ type PromptDat struct {
 	Worktree           string
 	Platform           string
 	Date               string
-	GitStatus          string
 	ContextFiles       []ContextFile
 	GlobalContextFiles []ContextFile
 	AvailSkillXML      string
@@ -116,10 +116,22 @@ func (p *Prompt) Build(ctx context.Context, provider, model string, store *confi
 	return sb.String(), nil
 }
 
+// maxContextFileBytes caps how much of a single context file goes into the
+// system prompt, so one huge file cannot crowd out everything else.
+const maxContextFileBytes = 64 * 1024
+
 func processFile(filePath string) *ContextFile {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil
+	}
+	if len(content) > maxContextFileBytes {
+		// Back off to a rune boundary so the cut never splits a character.
+		n := maxContextFileBytes
+		for n > 0 && !utf8.RuneStart(content[n]) {
+			n--
+		}
+		content = append(content[:n:n], fmt.Sprintf("\n\n[Ta-Da: truncated %s after %d bytes]", filePath, maxContextFileBytes)...)
 	}
 	return &ContextFile{
 		Path:    filePath,
@@ -169,17 +181,28 @@ func expandPath(path string, store *config.ConfigStore) string {
 }
 
 // loadContextFiles loads and deduplicates context files from a list of paths.
-func loadContextFiles(paths []string, workingDir string, store *config.ConfigStore) map[string][]ContextFile {
-	files := map[string][]ContextFile{}
+// Files come back in the order of paths (the first of any case-insensitive
+// duplicates wins), so the system prompt is byte-for-byte stable across
+// builds and provider prompt caching keeps working.
+func loadContextFiles(paths []string, workingDir string, store *config.ConfigStore) []ContextFile {
+	var files []ContextFile
+	seen := map[string]bool{}
 	for _, pth := range paths {
 		expanded := expandPath(pth, store)
 		pathKey := strings.ToLower(expanded)
-		if _, ok := files[pathKey]; ok {
+		if seen[pathKey] {
 			continue
 		}
-		files[pathKey] = processContextPath(expanded, workingDir)
+		seen[pathKey] = true
+		files = append(files, processContextPath(expanded, workingDir)...)
 	}
 	return files
+}
+
+// templateUses reports whether the prompt template mentions the named field,
+// e.g. ".GitStatus". Fields a template never reads are not worth gathering.
+func (p *Prompt) templateUses(field string) bool {
+	return strings.Contains(p.template, field)
 }
 
 func (p *Prompt) promptData(ctx context.Context, provider, model string, store *config.ConfigStore) (PromptDat, error) {
@@ -187,8 +210,6 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 	platform := cmp.Or(p.platform, runtime.GOOS)
 
 	cfg := store.Config()
-	contextFiles := loadContextFiles(cfg.Options.ContextPaths, workingDir, store)
-	globalContextFiles := loadContextFiles(cfg.Options.GlobalContextPaths, workingDir, store)
 
 	// Discover and load skills metadata.
 	var availSkillXML string
@@ -218,7 +239,7 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 	allSkills = skills.Deduplicate(allSkills)
 
 	// Filter out disabled skills.
-	allSkills = skills.Filter(allSkills, cfg.Options.DisabledSkills)
+	allSkills = skills.Filter(allSkills, store.EffectiveDisabledSkills())
 
 	if len(allSkills) > 0 {
 		availSkillXML = skills.ToPromptXML(allSkills)
@@ -235,22 +256,16 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 		Date:          p.now().Format("1/2/2006"),
 		AvailSkillXML: availSkillXML,
 	}
-	if isGit {
+	if isGit && p.templateUses(".Worktree") {
 		if wt, ok := worktree.Lookup(workingDir); ok {
 			data.Worktree = wt.Branch
 		}
-		var err error
-		data.GitStatus, err = getGitStatus(ctx, workingDir)
-		if err != nil {
-			return PromptDat{}, err
-		}
 	}
-
-	for _, files := range contextFiles {
-		data.ContextFiles = append(data.ContextFiles, files...)
+	if p.templateUses(".ContextFiles") {
+		data.ContextFiles = loadContextFiles(cfg.Options.ContextPaths, workingDir, store)
 	}
-	for _, files := range globalContextFiles {
-		data.GlobalContextFiles = append(data.GlobalContextFiles, files...)
+	if p.templateUses(".GlobalContextFiles") {
+		data.GlobalContextFiles = loadContextFiles(cfg.Options.GlobalContextPaths, workingDir, store)
 	}
 	return data, nil
 }
@@ -258,6 +273,22 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 func isGitRepo(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, ".git"))
 	return err == nil
+}
+
+// GitStatusSnapshot returns the git status of dir wrapped for the first
+// user turn of a conversation, or "" when dir is not a git repository or
+// the status is empty. It lives outside the system prompt so the prompt
+// prefix stays byte-identical across sessions and hits provider caches.
+func GitStatusSnapshot(ctx context.Context, dir string) string {
+	if dir == "" || !isGitRepo(dir) {
+		return ""
+	}
+	status, err := getGitStatus(ctx, dir)
+	status = strings.TrimSpace(status)
+	if err != nil || status == "" {
+		return ""
+	}
+	return "<git_status snapshot=\"conversation start\">\n" + status + "\n</git_status>"
 }
 
 func getGitStatus(ctx context.Context, dir string) (string, error) {

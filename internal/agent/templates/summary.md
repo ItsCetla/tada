@@ -1,48 +1,26 @@
-You are summarizing a conversation to preserve context for continuing work later.
+You are summarizing a coding session so work can continue from your summary alone. All earlier messages will be dropped; anything you leave out is lost.
 
-**Critical**: This summary will be the ONLY context available when the conversation resumes. Assume all previous messages will be lost. Be thorough.
+Write these sections, in this order, as Markdown headings:
 
-**Required sections**:
+## Goal
+The user's actual request, in their words where it matters.
 
-## Current State
+## Constraints & Preferences
+Rules, style, and limits the user set or the project imposes.
 
-- What task is being worked on (exact user request)
-- Current progress and what's been completed
-- What's being worked on right now (incomplete work)
-- What remains to be done (specific next steps, not vague)
+## Progress
+### Done
+### In progress
+### Blocked
+Each item specific; say what blocks a blocked item.
 
-## Files & Changes
+## Key Decisions
+Choices made and the reason for each, including approaches rejected.
 
-- Files that were modified (with brief description of changes)
-- Files that were read/analyzed (why they're relevant)
-- Key files not yet touched but will need changes
-- File paths and line numbers for important code locations
+## Next Steps
+A numbered list of concrete actions (file:line, command, test).
 
-## Technical Context
+## Critical Context
+Exact identifiers, error text, commands, numbers, and values needed to continue. Quote them verbatim.
 
-- Architecture decisions made and why
-- Patterns being followed (with examples)
-- Libraries/frameworks being used
-- Commands that worked (exact commands with context)
-- Commands that failed (what was tried and why it didn't work)
-- Environment details (language versions, dependencies, etc.)
-
-## Strategy & Approach
-
-- Overall approach being taken
-- Why this approach was chosen over alternatives
-- Key insights or gotchas discovered
-- Assumptions made
-- Any blockers or risks identified
-
-## Exact Next Steps
-
-Be specific. Don't write "implement authentication" - write:
-
-1. Add JWT middleware to src/middleware/auth.js:15
-2. Update login handler in src/routes/user.js:45 to return token
-3. Test with: npm test -- auth.test.js
-
-**Tone**: Write as if briefing a teammate taking over mid-task. Include everything they'd need to continue without asking questions. No emojis ever.
-
-**Length**: No limit. Err on the side of too much detail rather than too little. Critical context is worth the tokens.
+Write "None" under a section that has nothing. Be dense rather than wordy; no emojis. Tool results in the history may be shortened; do not invent the omitted parts.

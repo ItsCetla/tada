@@ -19,7 +19,7 @@ SELECT m.*
 FROM messages m
 WHERE m.session_id = ?
   AND m.created_at >= (SELECT s.created_at FROM messages s WHERE s.id = ?)
-ORDER BY m.created_at ASC;
+ORDER BY m.created_at ASC, m.rowid ASC;
 
 -- name: CreateMessage :one
 INSERT INTO messages (
@@ -70,6 +70,12 @@ SET
     updated_at = strftime('%s', 'now')
 WHERE id = ?;
 
+-- name: UpdateMessageCreatedAt :exec
+-- Moves a message in the session order; compaction uses it to place a
+-- summary right before the messages it keeps verbatim.
+UPDATE messages
+SET created_at = ?
+WHERE id = ?;
 
 -- name: DeleteMessage :exec
 DELETE FROM messages

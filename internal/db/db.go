@@ -42,8 +42,14 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.deleteMCPDisabledServerStmt, err = db.PrepareContext(ctx, deleteMCPDisabledServer); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteMCPDisabledServer: %w", err)
 	}
+	if q.deleteDisabledSkillStmt, err = db.PrepareContext(ctx, deleteDisabledSkill); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteDisabledSkill: %w", err)
+	}
 	if q.deleteMCPEnabledServerStmt, err = db.PrepareContext(ctx, deleteMCPEnabledServer); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteMCPEnabledServer: %w", err)
+	}
+	if q.deleteEnabledSkillStmt, err = db.PrepareContext(ctx, deleteEnabledSkill); err != nil {
+		return nil, fmt.Errorf("error preparing query DeleteEnabledSkill: %w", err)
 	}
 	if q.deleteMessageStmt, err = db.PrepareContext(ctx, deleteMessage); err != nil {
 		return nil, fmt.Errorf("error preparing query DeleteMessage: %w", err)
@@ -114,8 +120,14 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.insertMCPDisabledServerStmt, err = db.PrepareContext(ctx, insertMCPDisabledServer); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertMCPDisabledServer: %w", err)
 	}
+	if q.insertDisabledSkillStmt, err = db.PrepareContext(ctx, insertDisabledSkill); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertDisabledSkill: %w", err)
+	}
 	if q.insertMCPEnabledServerStmt, err = db.PrepareContext(ctx, insertMCPEnabledServer); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertMCPEnabledServer: %w", err)
+	}
+	if q.insertEnabledSkillStmt, err = db.PrepareContext(ctx, insertEnabledSkill); err != nil {
+		return nil, fmt.Errorf("error preparing query InsertEnabledSkill: %w", err)
 	}
 	if q.insertMessageCopyStmt, err = db.PrepareContext(ctx, insertMessageCopy); err != nil {
 		return nil, fmt.Errorf("error preparing query InsertMessageCopy: %w", err)
@@ -138,8 +150,14 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	if q.listMCPDisabledServersStmt, err = db.PrepareContext(ctx, listMCPDisabledServers); err != nil {
 		return nil, fmt.Errorf("error preparing query ListMCPDisabledServers: %w", err)
 	}
+	if q.listDisabledSkillsStmt, err = db.PrepareContext(ctx, listDisabledSkills); err != nil {
+		return nil, fmt.Errorf("error preparing query ListDisabledSkills: %w", err)
+	}
 	if q.listMCPEnabledServersStmt, err = db.PrepareContext(ctx, listMCPEnabledServers); err != nil {
 		return nil, fmt.Errorf("error preparing query ListMCPEnabledServers: %w", err)
+	}
+	if q.listEnabledSkillsStmt, err = db.PrepareContext(ctx, listEnabledSkills); err != nil {
+		return nil, fmt.Errorf("error preparing query ListEnabledSkills: %w", err)
 	}
 	if q.listMessagesBySessionStmt, err = db.PrepareContext(ctx, listMessagesBySession); err != nil {
 		return nil, fmt.Errorf("error preparing query ListMessagesBySession: %w", err)
@@ -173,6 +191,9 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	}
 	if q.updateMessageStmt, err = db.PrepareContext(ctx, updateMessage); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateMessage: %w", err)
+	}
+	if q.updateMessageCreatedAtStmt, err = db.PrepareContext(ctx, updateMessageCreatedAt); err != nil {
+		return nil, fmt.Errorf("error preparing query UpdateMessageCreatedAt: %w", err)
 	}
 	if q.updateSessionStmt, err = db.PrepareContext(ctx, updateSession); err != nil {
 		return nil, fmt.Errorf("error preparing query UpdateSession: %w", err)
@@ -215,9 +236,19 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing deleteMCPDisabledServerStmt: %w", cerr)
 		}
 	}
+	if q.deleteDisabledSkillStmt != nil {
+		if cerr := q.deleteDisabledSkillStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteDisabledSkillStmt: %w", cerr)
+		}
+	}
 	if q.deleteMCPEnabledServerStmt != nil {
 		if cerr := q.deleteMCPEnabledServerStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing deleteMCPEnabledServerStmt: %w", cerr)
+		}
+	}
+	if q.deleteEnabledSkillStmt != nil {
+		if cerr := q.deleteEnabledSkillStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing deleteEnabledSkillStmt: %w", cerr)
 		}
 	}
 	if q.deleteMessageStmt != nil {
@@ -335,9 +366,19 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing insertMCPDisabledServerStmt: %w", cerr)
 		}
 	}
+	if q.insertDisabledSkillStmt != nil {
+		if cerr := q.insertDisabledSkillStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertDisabledSkillStmt: %w", cerr)
+		}
+	}
 	if q.insertMCPEnabledServerStmt != nil {
 		if cerr := q.insertMCPEnabledServerStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing insertMCPEnabledServerStmt: %w", cerr)
+		}
+	}
+	if q.insertEnabledSkillStmt != nil {
+		if cerr := q.insertEnabledSkillStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing insertEnabledSkillStmt: %w", cerr)
 		}
 	}
 	if q.insertMessageCopyStmt != nil {
@@ -375,9 +416,19 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing listMCPDisabledServersStmt: %w", cerr)
 		}
 	}
+	if q.listDisabledSkillsStmt != nil {
+		if cerr := q.listDisabledSkillsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listDisabledSkillsStmt: %w", cerr)
+		}
+	}
 	if q.listMCPEnabledServersStmt != nil {
 		if cerr := q.listMCPEnabledServersStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing listMCPEnabledServersStmt: %w", cerr)
+		}
+	}
+	if q.listEnabledSkillsStmt != nil {
+		if cerr := q.listEnabledSkillsStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing listEnabledSkillsStmt: %w", cerr)
 		}
 	}
 	if q.listMessagesBySessionStmt != nil {
@@ -435,6 +486,11 @@ func (q *Queries) Close() error {
 			err = fmt.Errorf("error closing updateMessageStmt: %w", cerr)
 		}
 	}
+	if q.updateMessageCreatedAtStmt != nil {
+		if cerr := q.updateMessageCreatedAtStmt.Close(); cerr != nil {
+			err = fmt.Errorf("error closing updateMessageCreatedAtStmt: %w", cerr)
+		}
+	}
 	if q.updateSessionStmt != nil {
 		if cerr := q.updateSessionStmt.Close(); cerr != nil {
 			err = fmt.Errorf("error closing updateSessionStmt: %w", cerr)
@@ -490,7 +546,9 @@ type Queries struct {
 	deleteFileStmt                       *sql.Stmt
 	deleteFileReadStmt                   *sql.Stmt
 	deleteMCPDisabledServerStmt          *sql.Stmt
+	deleteDisabledSkillStmt              *sql.Stmt
 	deleteMCPEnabledServerStmt           *sql.Stmt
+	deleteEnabledSkillStmt               *sql.Stmt
 	deleteMessageStmt                    *sql.Stmt
 	deleteSessionStmt                    *sql.Stmt
 	deleteSessionFilesStmt               *sql.Stmt
@@ -514,7 +572,9 @@ type Queries struct {
 	insertFileCopyStmt                   *sql.Stmt
 	insertFileReadStmt                   *sql.Stmt
 	insertMCPDisabledServerStmt          *sql.Stmt
+	insertDisabledSkillStmt              *sql.Stmt
 	insertMCPEnabledServerStmt           *sql.Stmt
+	insertEnabledSkillStmt               *sql.Stmt
 	insertMessageCopyStmt                *sql.Stmt
 	listAllUserMessagesStmt              *sql.Stmt
 	listChildSessionsStmt                *sql.Stmt
@@ -522,7 +582,9 @@ type Queries struct {
 	listFilesBySessionStmt               *sql.Stmt
 	listLatestSessionFilesStmt           *sql.Stmt
 	listMCPDisabledServersStmt           *sql.Stmt
+	listDisabledSkillsStmt               *sql.Stmt
 	listMCPEnabledServersStmt            *sql.Stmt
+	listEnabledSkillsStmt                *sql.Stmt
 	listMessagesBySessionStmt            *sql.Stmt
 	listMessagesBySessionFromSummaryStmt *sql.Stmt
 	listNewFilesStmt                     *sql.Stmt
@@ -534,6 +596,7 @@ type Queries struct {
 	setSessionChannelStmt                *sql.Stmt
 	setSessionWorkingDirStmt             *sql.Stmt
 	updateMessageStmt                    *sql.Stmt
+	updateMessageCreatedAtStmt           *sql.Stmt
 	updateSessionStmt                    *sql.Stmt
 	updateSessionTitleAndUsageStmt       *sql.Stmt
 }
@@ -548,7 +611,9 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		deleteFileStmt:                       q.deleteFileStmt,
 		deleteFileReadStmt:                   q.deleteFileReadStmt,
 		deleteMCPDisabledServerStmt:          q.deleteMCPDisabledServerStmt,
+		deleteDisabledSkillStmt:              q.deleteDisabledSkillStmt,
 		deleteMCPEnabledServerStmt:           q.deleteMCPEnabledServerStmt,
+		deleteEnabledSkillStmt:               q.deleteEnabledSkillStmt,
 		deleteMessageStmt:                    q.deleteMessageStmt,
 		deleteSessionStmt:                    q.deleteSessionStmt,
 		deleteSessionFilesStmt:               q.deleteSessionFilesStmt,
@@ -572,7 +637,9 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		insertFileCopyStmt:                   q.insertFileCopyStmt,
 		insertFileReadStmt:                   q.insertFileReadStmt,
 		insertMCPDisabledServerStmt:          q.insertMCPDisabledServerStmt,
+		insertDisabledSkillStmt:              q.insertDisabledSkillStmt,
 		insertMCPEnabledServerStmt:           q.insertMCPEnabledServerStmt,
+		insertEnabledSkillStmt:               q.insertEnabledSkillStmt,
 		insertMessageCopyStmt:                q.insertMessageCopyStmt,
 		listAllUserMessagesStmt:              q.listAllUserMessagesStmt,
 		listChildSessionsStmt:                q.listChildSessionsStmt,
@@ -580,7 +647,9 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		listFilesBySessionStmt:               q.listFilesBySessionStmt,
 		listLatestSessionFilesStmt:           q.listLatestSessionFilesStmt,
 		listMCPDisabledServersStmt:           q.listMCPDisabledServersStmt,
+		listDisabledSkillsStmt:               q.listDisabledSkillsStmt,
 		listMCPEnabledServersStmt:            q.listMCPEnabledServersStmt,
+		listEnabledSkillsStmt:                q.listEnabledSkillsStmt,
 		listMessagesBySessionStmt:            q.listMessagesBySessionStmt,
 		listMessagesBySessionFromSummaryStmt: q.listMessagesBySessionFromSummaryStmt,
 		listNewFilesStmt:                     q.listNewFilesStmt,
@@ -592,6 +661,7 @@ func (q *Queries) WithTx(tx *sql.Tx) *Queries {
 		setSessionChannelStmt:                q.setSessionChannelStmt,
 		setSessionWorkingDirStmt:             q.setSessionWorkingDirStmt,
 		updateMessageStmt:                    q.updateMessageStmt,
+		updateMessageCreatedAtStmt:           q.updateMessageCreatedAtStmt,
 		updateSessionStmt:                    q.updateSessionStmt,
 		updateSessionTitleAndUsageStmt:       q.updateSessionTitleAndUsageStmt,
 	}

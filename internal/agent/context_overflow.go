@@ -2,12 +2,17 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/tools"
+	"github.com/charmbracelet/crush/internal/message"
 )
 
 // contextOverflowPhrases are lowercase fragments of the errors providers
@@ -101,6 +106,41 @@ func canRetryOverflow(retries, stepsDone int) bool {
 		return true
 	}
 	return retries < maxOverflowRetries && stepsDone > 0
+}
+
+// Prefixes of the prompts that continue a request after it was
+// summarized.
+const (
+	interruptedPromptPrefix   = "The previous session was interrupted because it got too long, the initial user request was: "
+	overflowRetryPromptPrefix = "The previous request failed because the conversation no longer fit in the context window, so it was summarized. The initial user request was: "
+)
+
+// continuationPrompt wraps the original request in prefix. A prompt that
+// is already a continuation is returned as is, so a request summarized
+// more than once doesn't nest the note.
+func continuationPrompt(prefix, prompt string) string {
+	if strings.HasPrefix(prompt, interruptedPromptPrefix) || strings.HasPrefix(prompt, overflowRetryPromptPrefix) {
+		return prompt
+	}
+	return prefix + "`" + prompt + "`"
+}
+
+// isSilentOverflow reports whether step looks like a provider dropping an
+// oversized prompt instead of rejecting it: it stopped at the length limit
+// without writing any text, reasoning or tool call. The prompt must also
+// be known to be large, either from the usage the provider reported or,
+// when it reported none, from estimatedPrompt filling the window up to
+// threshold. A model that simply hit a small output limit doesn't count.
+func isSilentOverflow(step fantasy.StepResult, estimatedPrompt, contextWindow, threshold int64) bool {
+	if step.FinishReason != fantasy.FinishReasonLength || step.Usage.OutputTokens != 0 ||
+		step.Content.Text() != "" || len(step.Content.Reasoning()) != 0 ||
+		len(step.Content.ToolCalls()) != 0 {
+		return false
+	}
+	if contextTokens(step.Usage) > 0 {
+		return true
+	}
+	return contextWindow > 0 && contextWindow-estimatedPrompt <= threshold
 }
 
 // overflowGiveUpMessage explains a context overflow that won't be
@@ -258,4 +298,292 @@ func truncateMiddle(s string, limit int) string {
 	head := strings.ToValidUTF8(s[:limit*2/3], "")
 	tail := strings.ToValidUTF8(s[len(s)-limit/3:], "")
 	return head + "\n\n[… " + strconv.Itoa(len(s)-len(head)-len(tail)) + " characters left out …]\n\n" + tail
+}
+
+const (
+	// defaultCompactionReserveTokens is the free context kept before the
+	// conversation is summarized, on top of the reply the next request
+	// reserves.
+	defaultCompactionReserveTokens = 16384
+	// defaultCompactionKeepRecentTokens is how much of the newest
+	// conversation a summary keeps verbatim.
+	defaultCompactionKeepRecentTokens = 20000
+	// summaryTokenEstimate is the size a new summary is assumed to have
+	// when the cut is chosen, before the summary exists.
+	summaryTokenEstimate = 2048
+)
+
+// compactionSettings returns the reserve and keep-recent token counts
+// from the options, or their defaults. The default reserve is scaled to
+// a fifth of a known contextWindow, so a small window isn't mostly
+// reserve; a configured reserve is used as is.
+func (a *sessionAgent) compactionSettings(contextWindow int64) (reserve, keepRecent int64) {
+	reserve, keepRecent = defaultCompactionReserve(contextWindow), defaultCompactionKeepRecentTokens
+	if a.cfg == nil || a.cfg.Config() == nil || a.cfg.Config().Options == nil {
+		return reserve, keepRecent
+	}
+	opts := a.cfg.Config().Options
+	if opts.CompactionReserveTokens > 0 {
+		reserve = int64(opts.CompactionReserveTokens)
+	}
+	if opts.CompactionKeepRecentTokens > 0 {
+		keepRecent = int64(opts.CompactionKeepRecentTokens)
+	}
+	return reserve, keepRecent
+}
+
+// defaultCompactionReserve returns the default reserve for a context
+// window: defaultCompactionReserveTokens, or a fifth of a smaller window.
+func defaultCompactionReserve(contextWindow int64) int64 {
+	if contextWindow > 0 {
+		return min(defaultCompactionReserveTokens, contextWindow/5)
+	}
+	return defaultCompactionReserveTokens
+}
+
+// summarizeThreshold returns how many free tokens must remain in the
+// context window before auto-summarize kicks in: the reserve plus the
+// reply the next request asks for. Servers such as vLLM reject a request
+// when prompt + max_tokens exceeds the window, so the reply has to fit
+// too. The result is capped at half the window so a large max_tokens on
+// a small model can't trigger a summarize loop.
+func summarizeThreshold(contextWindow, maxOutputTokens, reserve int64) int64 {
+	return min(max(reserve, 0)+max(maxOutputTokens, 0), contextWindow/2)
+}
+
+// compactionKeepRecent caps the verbatim tail at a quarter of the window,
+// so the tail and its summary fit well below the summarize threshold.
+func compactionKeepRecent(keepRecent, contextWindow int64) int64 {
+	if contextWindow > 0 {
+		return min(keepRecent, contextWindow/4)
+	}
+	return keepRecent
+}
+
+// compactionKeepBudget returns the most estimated tokens a summary may
+// keep verbatim so that the prompt after it (fixedTokens of system prompt
+// and tools, plus summaryTokens) still leaves threshold plus a quarter of
+// the window free. Without that headroom a small window is summarized
+// again a step or two later. It is negative when nothing can be kept, and
+// unbounded when the window is unknown.
+func compactionKeepBudget(contextWindow, threshold, fixedTokens, summaryTokens int64) int64 {
+	if contextWindow <= 0 {
+		return math.MaxInt64
+	}
+	return contextWindow - threshold - contextWindow/4 - fixedTokens - summaryTokens
+}
+
+// compactionCutPoint returns the index of the first message a summary
+// keeps verbatim; the messages before it are summarized. It walks back
+// from the newest message until keepRecent estimated tokens are kept,
+// then moves the cut forward to the nearest user message, or failing
+// that to any message, that doesn't separate a tool result from its call
+// and keeps at most maxKept estimated tokens. When the whole history
+// fits in keepRecent, the newer half is kept. It returns len(msgs),
+// meaning summarize everything, when no such cut leaves anything to
+// summarize. When skipFirst is set msgs[0] is the previous summary,
+// which can't be the only thing summarized.
+func compactionCutPoint(msgs []message.Message, keepRecent, maxKept int64, skipFirst bool) int {
+	n := len(msgs)
+	first := 0
+	if skipFirst {
+		first = 1
+	}
+	if n-first < 2 || keepRecent <= 0 || maxKept <= 0 {
+		return n
+	}
+	sizes := make([]int64, n)
+	var total int64
+	for i := range msgs {
+		sizes[i] = estimateMessageTokens(msgs[i].ToAIMessage())
+		total += sizes[i]
+	}
+	// suffix[i] is the estimate of msgs[i:].
+	suffix := make([]int64, n+1)
+	for i := n - 1; i >= 0; i-- {
+		suffix[i] = suffix[i+1] + sizes[i]
+	}
+	if total <= keepRecent {
+		keepRecent = total / 2
+	}
+
+	// Walk back to the oldest message the tail needs.
+	start := n
+	var kept int64
+	for start > first && kept < keepRecent {
+		start--
+		kept += sizes[start]
+	}
+
+	// callAt maps each tool call to the message that made it.
+	callAt := make(map[string]int)
+	for i, m := range msgs {
+		for _, tc := range m.ToolCalls() {
+			callAt[tc.ID] = i
+		}
+	}
+	// minCall[i] is the earliest message holding a call whose result is
+	// at index i or later.
+	minCall := make([]int, n+1)
+	minCall[n] = n
+	for i := n - 1; i >= 0; i-- {
+		minCall[i] = minCall[i+1]
+		for _, tr := range msgs[i].ToolResults() {
+			if c, ok := callAt[tr.ToolCallID]; ok && c < minCall[i] {
+				minCall[i] = c
+			}
+		}
+	}
+	valid := func(c int) bool {
+		return msgs[c].Role != message.Tool &&
+			minCall[c] >= c &&
+			suffix[c] <= maxKept
+	}
+
+	for c := max(start, first+1); c < n; c++ {
+		if msgs[c].Role == message.User && valid(c) {
+			return c
+		}
+	}
+	for c := max(start, first+1); c < n; c++ {
+		if valid(c) {
+			return c
+		}
+	}
+	return n
+}
+
+// compactionBackdates returns the indexes of the summarized messages that
+// must move back in time so the summary, dated keptFirst-1, sorts after
+// all of them and before the kept messages (created_at has whole-second
+// resolution, so the cut can split a second). Each one is re-dated to
+// keptFirst-2.
+func compactionBackdates(older []message.Message, keptFirst int64) []int {
+	var idx []int
+	for i := range older {
+		if older[i].CreatedAt >= keptFirst-1 {
+			idx = append(idx, i)
+		}
+	}
+	return idx
+}
+
+// fileListTools are the tools whose file_path arguments are listed after
+// a summary, and whether each one changes the file.
+var fileListTools = map[string]bool{
+	tools.ViewToolName:      false,
+	tools.EditToolName:      true,
+	tools.MultiEditToolName: true,
+	tools.WriteToolName:     true,
+}
+
+const (
+	// summaryFileListsMarker starts the block formatSummaryFileLists
+	// appends. It is an HTML comment, so the rendered summary hides it.
+	summaryFileListsMarker      = "<!-- tada:file-lists -->"
+	summaryFilesReadHeading     = "Files read:"
+	summaryFilesModifiedHeading = "Files modified:"
+)
+
+// summaryFileLists collects the files read and modified by the tool calls
+// in msgs, plus the lists an earlier summary carried in prevSummary. A
+// file that was modified is only listed as modified. Both lists are
+// sorted.
+func summaryFileLists(msgs []message.Message, prevSummary string) (read, modified []string) {
+	readSet := make(map[string]struct{})
+	modSet := make(map[string]struct{})
+	prevRead, prevMod := parseSummaryFileLists(prevSummary)
+	for _, p := range prevRead {
+		readSet[p] = struct{}{}
+	}
+	for _, p := range prevMod {
+		modSet[p] = struct{}{}
+	}
+	for _, m := range msgs {
+		for _, tc := range m.ToolCalls() {
+			modifies, ok := fileListTools[tc.Name]
+			if !ok {
+				continue
+			}
+			var input struct {
+				FilePath string `json:"file_path"`
+			}
+			if json.Unmarshal([]byte(tc.Input), &input) != nil || input.FilePath == "" {
+				continue
+			}
+			if modifies {
+				modSet[input.FilePath] = struct{}{}
+			} else {
+				readSet[input.FilePath] = struct{}{}
+			}
+		}
+	}
+	for p := range modSet {
+		modified = append(modified, p)
+		delete(readSet, p)
+	}
+	for p := range readSet {
+		read = append(read, p)
+	}
+	slices.Sort(read)
+	slices.Sort(modified)
+	return read, modified
+}
+
+// formatSummaryFileLists renders the lists appended to a summary, after
+// summaryFileListsMarker. It returns "" when both are empty.
+func formatSummaryFileLists(read, modified []string) string {
+	if len(read) == 0 && len(modified) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n\n" + summaryFileListsMarker)
+	for _, l := range []struct {
+		heading string
+		paths   []string
+	}{{summaryFilesReadHeading, read}, {summaryFilesModifiedHeading, modified}} {
+		if len(l.paths) == 0 {
+			continue
+		}
+		sb.WriteString("\n\n" + l.heading)
+		for _, p := range l.paths {
+			sb.WriteString("\n- " + p)
+		}
+	}
+	return sb.String()
+}
+
+// parseSummaryFileLists reads back the lists formatSummaryFileLists
+// appended to a summary. Only the block after the last marker counts,
+// so lists the model wrote itself are ignored.
+func parseSummaryFileLists(summary string) (read, modified []string) {
+	i := strings.LastIndex(summary, summaryFileListsMarker)
+	if i < 0 {
+		return nil, nil
+	}
+	var cur *[]string
+	for line := range strings.SplitSeq(summary[i+len(summaryFileListsMarker):], "\n") {
+		switch {
+		case line == summaryFilesReadHeading:
+			cur = &read
+		case line == summaryFilesModifiedHeading:
+			cur = &modified
+		case cur != nil && strings.HasPrefix(line, "- "):
+			*cur = append(*cur, strings.TrimPrefix(line, "- "))
+		default:
+			cur = nil
+		}
+	}
+	return read, modified
+}
+
+// stripSummaryFileLists removes the block formatSummaryFileLists appended
+// to a summary, so the summarizer sees only the model's own text; the
+// lists are carried forward by summaryFileLists instead.
+func stripSummaryFileLists(summary string) string {
+	i := strings.LastIndex(summary, summaryFileListsMarker)
+	if i < 0 {
+		return summary
+	}
+	return strings.TrimRight(summary[:i], "\n")
 }

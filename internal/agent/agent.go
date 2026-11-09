@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
@@ -35,6 +36,7 @@ import (
 	"charm.land/fantasy/providers/vercel"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/config"
@@ -53,14 +55,7 @@ import (
 	"github.com/charmbracelet/x/exp/charmtone"
 )
 
-const (
-	DefaultSessionName = "Untitled Session"
-
-	// Constants for auto-summarization thresholds
-	largeContextWindowThreshold = 200_000
-	largeContextWindowBuffer    = 20_000
-	smallContextWindowRatio     = 0.2
-)
+const DefaultSessionName = "Untitled Session"
 
 var userAgent = fmt.Sprintf("Tada/%s (https://tada.cetla.dev)", version.Version)
 
@@ -68,7 +63,7 @@ var userAgent = fmt.Sprintf("Tada/%s (https://tada.cetla.dev)", version.Version)
 var titlePrompt []byte
 
 //go:embed templates/summary.md
-var summaryPrompt []byte
+var summaryPrompt string
 
 // Used to remove <think> tags from generated titles.
 var (
@@ -144,6 +139,13 @@ type SessionAgentCall struct {
 	// fantasy retries the stream transparently. Returning an error
 	// surfaces the original auth error without retry.
 	OnAuthRefresh func(ctx context.Context, err *fantasy.ProviderError) error
+	// Model, when non-nil, pins the large model this turn runs on. The
+	// coordinator sets it to the model ProviderOptions/MaxOutputTokens
+	// were derived from, so a model switch made elsewhere (another
+	// session, a dialog) while this turn runs or waits in the queue
+	// cannot change it. When nil, Run pins the agent's large model at
+	// the moment the turn starts.
+	Model *Model
 	// channelMeta holds the attributes of the <channel> element a
 	// channel-originated turn was started with, parsed once at Run
 	// entry. It survives the auto-summarize continuation, whose Prompt
@@ -633,7 +635,7 @@ func (a *sessionAgent) persistCanceledTurn(ctx context.Context, call SessionAgen
 			return err
 		}
 	}
-	largeModel := a.largeModel.Get()
+	largeModel := a.runModel(call)
 	assistant, err := a.messages.Create(writeCtx, call.SessionID, message.CreateMessageParams{
 		Role:     message.Assistant,
 		Parts:    []message.ContentPart{},
@@ -855,7 +857,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 
 	// Copy mutable fields under lock to avoid races with SetTools/SetModels.
 	agentTools := filterToolsForChannel(a.tools.Copy(), call.Channel, mcp.GetStates())
-	largeModel := a.largeModel.Get()
+	// Pin the model for the whole turn: steps, retries, and the
+	// auto-summarize continuation all use it, so switching models in
+	// another session never changes a run already in flight.
+	largeModel := a.runModel(call)
+	call.Model = &largeModel
 	systemPrompt := a.systemPromptFor(ctx)
 	promptPrefix := a.systemPromptPrefix.Get()
 	var instructions strings.Builder
@@ -908,18 +914,37 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// Generate title from the first real (non-shell) user prompt.
 	// can take tens of seconds. Blocking Run on it delays the
 	// response to the caller. Use a detached context so the title
-	// goroutine survives Run's cancel.
-	if !hasUserTextMessage(msgs) {
+	// goroutine survives Run's cancel. Sub-agent sessions are created
+	// with a title, and headless runs take theirs from the prompt: an
+	// LLM title is an extra request that competes with the agent for
+	// the provider's slot and evicts the prompt cache on single-slot
+	// local servers.
+	if !hasUserTextMessage(msgs) && !a.isSubAgent {
 		titleCtx := context.WithoutCancel(ctx)
-		go a.GenerateTitle(titleCtx, call.SessionID, call.Prompt)
+		if IsHeadless(ctx) {
+			go a.titleFromPrompt(titleCtx, call.SessionID, call.Prompt)
+		} else {
+			go a.GenerateTitle(titleCtx, call.SessionID, call.Prompt)
+		}
 	}
 
 	// Add the user message to the session.
-	_, err = a.createUserMessage(ctx, call)
+	userMsg, err := a.createUserMessage(ctx, call)
 	if err != nil {
 		return nil, err
 	}
 	userMsgCreated = true
+
+	// A new session gets the git status once, as a hidden user message
+	// ahead of the first prompt. It stays out of the system prompt
+	// because it differs between sessions, and there it would break
+	// the provider prompt cache for the whole prefix. It is saved only
+	// once the prompt is, then dated a second earlier to sort before it.
+	if len(msgs) == 0 && !a.isSubAgent && !largeModel.ClaudeCode {
+		if gitMsg, ok := a.saveGitStatusSnapshot(ctx, call.SessionID, userMsg.CreatedAt); ok {
+			msgs = append(msgs, gitMsg)
+		}
+	}
 
 	// Add the session to the context. The run context (genCtx) and its
 	// cancel func were already created and registered under the dispatch
@@ -930,6 +955,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 
 	var stepMessages []fantasy.Message
 	var shouldSummarize bool
+	// silentOverflow is set when a step ended at the length limit without
+	// writing anything, which providers that drop an oversized prompt
+	// instead of rejecting it do; the turn is summarized and continued.
+	var silentOverflow bool
 	// overflowed is set when the provider rejected the prompt for not
 	// fitting the context window and the turn will be summarized and
 	// re-run instead of failing.
@@ -937,6 +966,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// stepsDone counts the steps this turn finished, so an overflowing
 	// re-run can tell whether it made progress.
 	var stepsDone int
+	// truncatedCalls is set when a step cut off by the output token limit
+	// carried tool calls, which did not run. truncationRetry is set when
+	// a continuation was queued for them.
+	var truncatedCalls, truncationRetry bool
 	sanitizedToolCalls := make(map[string]bool)
 	// Full names of tool calls that completed without error this turn.
 	// Written only from the streaming callbacks (which run sequentially)
@@ -1124,13 +1157,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			}
 		},
 		OnAuthRefresh: call.OnAuthRefresh,
-		ModelProvider: func() fantasy.LanguageModel {
-			m := a.largeModel.Get()
-			slog.Info("ModelProvider called",
-				"provider", m.ModelCfg.Provider,
-				"model", m.ModelCfg.Model)
-			return m.Model
-		},
+		ModelProvider: a.pinnedModelProvider(largeModel),
 		OnToolCall: func(tc fantasy.ToolCallContent) error {
 			input, wasSanitized := sanitizeToolInput(tc.ToolName, tc.ToolCallID, tc.Input)
 			if wasSanitized {
@@ -1177,6 +1204,12 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			switch stepResult.FinishReason {
 			case fantasy.FinishReasonLength:
 				finishReason = message.FinishReasonMaxTokens
+				if len(truncatedToolCalls(stepResult)) > 0 {
+					truncatedCalls = true
+				}
+				if err := a.failTruncatedToolCalls(ctx, currentAssistant, stepResult); err != nil {
+					return err
+				}
 			case fantasy.FinishReasonStop:
 				finishReason = message.FinishReasonEndTurn
 			case fantasy.FinishReasonToolCalls:
@@ -1226,19 +1259,40 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			return a.messages.Update(genCtx, *currentAssistant)
 		},
 		StopWhen: []fantasy.StopCondition{
-			func(_ []fantasy.StepResult) bool {
+			func(steps []fantasy.StepResult) bool {
+				if a.disableAutoSummarize || a.magicContextCompaction() {
+					return false
+				}
 				// The catalog window, or one an earlier overflow error
 				// reported for this model.
 				cw := a.contextWindow(largeModel)
+				reserve, _ := a.compactionSettings(cw)
+				threshold := summarizeThreshold(cw, call.MaxOutputTokens, reserve)
+				var lastPrompt int64
+				if len(steps) > 0 {
+					last := steps[len(steps)-1]
+					lastPrompt = contextTokens(last.Usage)
+					// A step cut at the length limit before it wrote
+					// anything: the prompt took the whole window. The
+					// retry budget keeps a step that keeps coming back
+					// empty from summarizing forever.
+					if isSilentOverflow(last, estimateMessageTokens(stepMessages), cw, threshold) &&
+						canRetryOverflow(call.overflowRetries, len(steps)-1) {
+						silentOverflow = true
+						shouldSummarize = true
+						return true
+					}
+				}
 				// If context window is unknown (0), skip auto-summarize
 				// to avoid immediately truncating custom/local models.
 				if cw == 0 {
 					return false
 				}
-				tokens := currentSession.CompletionTokens + currentSession.PromptTokens
-				remaining := cw - tokens
-				threshold := summarizeThreshold(cw, call.MaxOutputTokens)
-				if (remaining <= threshold) && !a.disableAutoSummarize && !a.magicContextCompaction() {
+				// The session counters, or the last step's own prompt
+				// when it reports more (a provider that accepted an
+				// oversized prompt without complaint).
+				tokens := max(currentSession.CompletionTokens+currentSession.PromptTokens, lastPrompt)
+				if cw-tokens <= threshold {
 					shouldSummarize = true
 					return true
 				}
@@ -1417,7 +1471,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		held, _ := a.messageQueue.Take(call.SessionID)
 		mu.Unlock()
 		a.activeRequests.Del(call.SessionID)
-		summarizeErr := a.Summarize(genCtx, call.SessionID, call.ProviderOptions, call.OnAuthRefresh)
+		summarizeErr := a.summarize(genCtx, call.SessionID, largeModel, call.ProviderOptions, call.OnAuthRefresh)
 		summarized := false
 		if sess, getErr := a.sessions.Get(ctx, call.SessionID); getErr == nil {
 			summarized = sess.SummaryMessageID != "" && sess.SummaryMessageID != currentSession.SummaryMessageID
@@ -1435,10 +1489,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			// of anything that was queued behind it.
 			retry := call
 			retry.overflowRetries = call.overflowRetries + 1
-			if call.overflowRetries == 0 {
-				// A re-run's prompt already carries this note.
-				retry.Prompt = fmt.Sprintf("The previous request failed because the conversation no longer fit in the context window, so it was summarized. The initial user request was: `%s`", call.Prompt)
-			}
+			retry.Prompt = continuationPrompt(overflowRetryPromptPrefix, call.Prompt)
 			queue := append([]SessionAgentCall{retry}, held...)
 			a.messageQueue.Set(call.SessionID, append(queue, existing...))
 		case summarizeErr == nil:
@@ -1465,19 +1516,40 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		}
 	} else if shouldSummarize {
 		a.activeRequests.Del(call.SessionID)
-		if summarizeErr := a.Summarize(genCtx, call.SessionID, call.ProviderOptions, call.OnAuthRefresh); summarizeErr != nil {
+		if summarizeErr := a.summarize(genCtx, call.SessionID, largeModel, call.ProviderOptions, call.OnAuthRefresh); summarizeErr != nil {
 			return nil, summarizeErr
 		}
-		// If the agent wasn't done...
-		if len(currentAssistant.ToolCalls()) > 0 {
-			existing, ok := a.messageQueue.Get(call.SessionID)
-			if !ok {
-				existing = []SessionAgentCall{}
+		// If the agent wasn't done, or the step was lost to a silent
+		// overflow...
+		if len(currentAssistant.ToolCalls()) > 0 || silentOverflow {
+			if silentOverflow {
+				// Counts against the same budget as an overflow
+				// error, so a step that keeps coming back empty
+				// gives up.
+				call.overflowRetries++
 			}
-			call.Prompt = fmt.Sprintf("The previous session was interrupted because it got too long, the initial user request was: `%s`", call.Prompt)
-			existing = append(existing, call)
-			a.messageQueue.Set(call.SessionID, existing)
+			call.Prompt = continuationPrompt(interruptedPromptPrefix, call.Prompt)
+			mu := a.sessionMu(call.SessionID)
+			mu.Lock()
+			existing, _ := a.messageQueue.Get(call.SessionID)
+			a.messageQueue.Set(call.SessionID, append(existing, call))
+			mu.Unlock()
 		}
+	} else if truncatedCalls && canRetryOverflow(call.overflowRetries, stepsDone) {
+		// A tool call cut off by the output token limit ends the loop
+		// without running. Continue the turn so the model can retry
+		// it, ahead of anything queued behind this request.
+		truncationRetry = true
+		retry := call
+		retry.overflowRetries = call.overflowRetries + 1
+		retry.Prompt = truncatedToolCallPrompt
+		retry.HiddenUserMessage = true
+		retry.Attachments = nil
+		mu := a.sessionMu(call.SessionID)
+		mu.Lock()
+		existing, _ := a.messageQueue.Get(call.SessionID)
+		a.messageQueue.Set(call.SessionID, append([]SessionAgentCall{retry}, existing...))
+		mu.Unlock()
 	}
 
 	// Route the finished turn's response back to the channel it came
@@ -1486,7 +1558,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	// replies when it actually finishes. Runs before the busy state is
 	// released so a follow-up push queued behind this turn cannot
 	// overtake its reply.
-	if currentAssistant != nil && !overflowed && (!shouldSummarize || len(currentAssistant.ToolCalls()) == 0) {
+	if currentAssistant != nil && !overflowed && !truncationRetry && (!shouldSummarize || (len(currentAssistant.ToolCalls()) == 0 && !silentOverflow)) {
 		a.sendChannelReply(ctx, call, currentAssistant.Content().String(), completedToolCalls)
 	}
 
@@ -1611,14 +1683,18 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 }
 
 func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fantasy.ProviderOptions, onAuthRefresh func(context.Context, *fantasy.ProviderError) error) error {
+	return a.summarize(ctx, sessionID, a.largeModel.Get(), opts, onAuthRefresh)
+}
+
+// summarize summarizes the session on largeModel, which stays pinned for
+// the whole summary (see pinnedModelProvider).
+func (a *sessionAgent) summarize(ctx context.Context, sessionID string, largeModel Model, opts fantasy.ProviderOptions, onAuthRefresh func(context.Context, *fantasy.ProviderError) error) error {
 	if a.IsSessionBusy(sessionID) {
 		return ErrSessionBusy
 	}
 	// Attribute the summary's provider traffic to the session.
 	ctx = context.WithValue(ctx, tools.SessionIDContextKey, sessionID)
 
-	// Copy mutable fields under lock to avoid races with SetModels.
-	largeModel := a.largeModel.Get()
 	systemPromptPrefix := a.systemPromptPrefix.Get()
 	if largeModel.ClaudeCode {
 		return ErrClaudeCodeSummarize
@@ -1637,7 +1713,33 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return nil
 	}
 
-	aiMsgs, _ := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages)
+	// Keep the newest messages verbatim and summarize only the older
+	// ones. The summary is moved in front of the kept messages below.
+	cw := a.contextWindow(largeModel)
+	reserve, keepRecent := a.compactionSettings(cw)
+	hasPrevSummary := currentSession.SummaryMessageID != "" && msgs[0].ID == currentSession.SummaryMessageID
+	// The last prompt minus the messages in it estimates the system
+	// prompt and tools, which the summary doesn't shrink.
+	var msgTokens int64
+	for i := range msgs {
+		msgTokens += estimateMessageTokens(msgs[i].ToAIMessage())
+	}
+	fixedTokens := max(currentSession.PromptTokens+currentSession.CompletionTokens-msgTokens, 0)
+	summaryTokens := int64(summaryTokenEstimate)
+	if hasPrevSummary {
+		summaryTokens = max(summaryTokens, estimateMessageTokens(msgs[0].ToAIMessage()))
+	}
+	// Keep only as much as leaves room to work before the next summary.
+	maxKept := compactionKeepBudget(cw, summarizeThreshold(cw, modelMaxOutputTokens(largeModel), reserve), fixedTokens, summaryTokens)
+	cut := compactionCutPoint(msgs, compactionKeepRecent(keepRecent, cw), maxKept, hasPrevSummary)
+	older, kept := msgs[:cut], msgs[cut:]
+	var prevSummary string
+	if hasPrevSummary {
+		prevSummary = msgs[0].Content().Text
+	}
+	filesRead, filesModified := summaryFileLists(older, prevSummary)
+
+	aiMsgs, _ := a.preparePrompt(summaryInputMessages(older), largeModel.CatwalkCfg.SupportsImages)
 
 	genCtx, cancel := context.WithCancel(ctx)
 	ac := &activeCancel{cancel: cancel}
@@ -1652,7 +1754,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 
 	agent := fantasy.NewAgent(
 		largeModel.Model,
-		fantasy.WithSystemPrompt(string(summaryPrompt)),
+		fantasy.WithSystemPrompt(summaryPrompt),
 		fantasy.WithUserAgent(userAgent),
 	)
 	summaryMessage, err := a.messages.Create(ctx, sessionID, message.CreateMessageParams{
@@ -1666,6 +1768,9 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	}
 
 	summaryPromptText := buildSummaryPrompt(currentSession.Todos)
+	if len(kept) > 0 {
+		summaryPromptText += "\n\nThe newest messages are kept word for word after your summary, so summarize only the conversation above."
+	}
 
 	stream := func(history []fantasy.Message, prompt string) (*fantasy.AgentResult, error) {
 		return agent.Stream(genCtx, fantasy.AgentStreamCall{
@@ -1674,9 +1779,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			Headers:         sessionHeaders(sessionID),
 			ProviderOptions: opts,
 			OnAuthRefresh:   onAuthRefresh,
-			ModelProvider: func() fantasy.LanguageModel {
-				return a.largeModel.Get().Model
-			},
+			ModelProvider:   a.pinnedModelProvider(largeModel),
 			PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
 				prepared.Messages = options.Messages
 				if systemPromptPrefix != "" {
@@ -1738,9 +1841,13 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return err
 	}
 
+	summaryMessage.AppendContent(formatSummaryFileLists(filesRead, filesModified))
 	summaryMessage.AddFinish(message.FinishReasonEndTurn, "", "")
 	err = a.messages.Update(genCtx, summaryMessage)
 	if err != nil {
+		return err
+	}
+	if err = a.placeSummary(genCtx, summaryMessage.ID, older, kept); err != nil {
 		return err
 	}
 
@@ -1763,8 +1870,14 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	usage := resp.Response.Usage
 	currentSession.SummaryMessageID = summaryMessage.ID
 	currentSession.CompletionTokens = summaryCompletionTokens(usage, summaryMessage)
-	currentSession.PromptTokens = 0
-	currentSession.EstimatedUsage = usageIsZero(usage)
+	// The next prompt is the system prompt and tools plus the kept
+	// messages, then the summary, which CompletionTokens counts.
+	var keptTokens int64
+	for i := range kept {
+		keptTokens += estimateMessageTokens(kept[i].ToAIMessage())
+	}
+	currentSession.PromptTokens = fixedTokens + keptTokens
+	currentSession.EstimatedUsage = usageIsZero(usage) || currentSession.PromptTokens > 0
 	_, err = a.sessions.Save(genCtx, currentSession)
 	if err != nil {
 		return err
@@ -1784,6 +1897,32 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	a.messageQueue.Set(sessionID, queuedMessages[1:])
 	_, qErr := a.Run(ctx, firstQueuedMessage)
 	return qErr
+}
+
+// placeSummary dates the summary so it sorts right before kept, the
+// messages it doesn't cover. Messages only have second resolution, so
+// summarized messages from the same second as kept[0], or the one before,
+// are moved two seconds back to stay older than the summary.
+func (a *sessionAgent) placeSummary(ctx context.Context, summaryID string, older, kept []message.Message) error {
+	if len(kept) == 0 {
+		return nil
+	}
+	keptFirst := kept[0].CreatedAt
+	for _, i := range compactionBackdates(older, keptFirst) {
+		if err := a.messages.SetCreatedAt(ctx, older[i].ID, keptFirst-2); err != nil {
+			return err
+		}
+	}
+	return a.messages.SetCreatedAt(ctx, summaryID, keptFirst-1)
+}
+
+// modelMaxOutputTokens returns the output token limit requests to model
+// use: the configured one, or the catalog default.
+func modelMaxOutputTokens(model Model) int64 {
+	if model.ModelCfg.MaxTokens != 0 {
+		return model.ModelCfg.MaxTokens
+	}
+	return model.CatwalkCfg.DefaultMaxTokens
 }
 
 func (a *sessionAgent) getCacheControlOptions() fantasy.ProviderOptions {
@@ -1835,7 +1974,7 @@ func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentC
 
 func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {
 	var history []fantasy.Message
-	if !a.isSubAgent {
+	if !a.isSubAgent && a.hasTool(tools.TodosToolName) {
 		history = append(history, fantasy.NewUserMessage(
 			fmt.Sprintf(
 				"<system_reminder>%s</system_reminder>",
@@ -2041,15 +2180,56 @@ func (a *sessionAgent) getSessionMessages(ctx context.Context, session session.S
 	return msgs, nil
 }
 
+// saveGitStatusSnapshot saves the git status as a hidden user message
+// dated just before the prompt created at promptAt. It reports false
+// when there is no snapshot or it couldn't be saved.
+func (a *sessionAgent) saveGitStatusSnapshot(ctx context.Context, sessionID string, promptAt int64) (message.Message, bool) {
+	snap := prompt.GitStatusSnapshot(ctx, workdir.From(ctx, a.workDir))
+	if snap == "" {
+		return message.Message{}, false
+	}
+	gitMsg, err := a.messages.Create(ctx, sessionID, message.CreateMessageParams{
+		Role:  message.User,
+		Parts: []message.ContentPart{message.TextContent{Text: snap, Hidden: true}},
+	})
+	if err != nil {
+		slog.Warn("Failed to save the git status snapshot", "error", err)
+		return message.Message{}, false
+	}
+	if err := a.messages.SetCreatedAt(ctx, gitMsg.ID, promptAt-1); err != nil {
+		slog.Warn("Failed to date the git status snapshot", "error", err)
+		if delErr := a.messages.Delete(ctx, gitMsg.ID); delErr != nil {
+			slog.Warn("Failed to remove the git status snapshot", "error", delErr)
+		}
+		return message.Message{}, false
+	}
+	gitMsg.CreatedAt = promptAt - 1
+	return gitMsg, true
+}
+
+// hasTool reports whether the agent has a tool named name.
+func (a *sessionAgent) hasTool(name string) bool {
+	if a.tools == nil {
+		return false
+	}
+	for t := range a.tools.Seq() {
+		if t.Info().Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // hasUserTextMessage reports whether any user message in msgs contains
 // text content (as opposed to only shell commands or other non-text parts).
+// Hidden text, such as the git status snapshot, doesn't count.
 func hasUserTextMessage(msgs []message.Message) bool {
 	for _, msg := range msgs {
 		if msg.Role != message.User {
 			continue
 		}
 		for _, part := range msg.Parts {
-			if tc, ok := part.(message.TextContent); ok && tc.Text != "" {
+			if tc, ok := part.(message.TextContent); ok && tc.Text != "" && !tc.Hidden {
 				return true
 			}
 		}
@@ -2064,6 +2244,31 @@ func promptTitle(prompt string) string {
 		title = ansi.Truncate(title, 50, "…")
 	}
 	return title
+}
+
+type headlessKey struct{}
+
+// WithHeadless marks ctx as belonging to a non-interactive run, such as
+// `tada run`, where there is no UI to show a generated session title.
+func WithHeadless(ctx context.Context) context.Context {
+	return context.WithValue(ctx, headlessKey{}, true)
+}
+
+// IsHeadless reports whether ctx was marked with [WithHeadless].
+func IsHeadless(ctx context.Context) bool {
+	v, _ := ctx.Value(headlessKey{}).(bool)
+	return v
+}
+
+// titleFromPrompt names the session after its first prompt without
+// asking a model.
+func (a *sessionAgent) titleFromPrompt(ctx context.Context, sessionID, userPrompt string) {
+	title := cmp.Or(promptTitle(userPrompt), DefaultSessionName)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := a.sessions.Rename(ctx, sessionID, title); err != nil {
+		slog.Error("Failed to save session title", "error", err)
+	}
 }
 
 // GenerateTitle generates a session title based on the initial prompt.
@@ -2265,23 +2470,6 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 
 	session.Cost += cost
 	updateSessionTokenCounters(session, usage)
-}
-
-// summarizeThreshold returns how many free tokens must remain in the
-// context window before auto-summarize kicks in. It covers the headroom
-// for the next prompt plus the reply the next request reserves: servers
-// such as vLLM reject a request when prompt + max_tokens exceeds the
-// window, so a 20k buffer alone overflows when max_tokens is 32k. The
-// result is capped at half the window so a large max_tokens on a small
-// model can't trigger a summarize loop.
-func summarizeThreshold(contextWindow, maxOutputTokens int64) int64 {
-	var headroom int64
-	if contextWindow > largeContextWindowThreshold {
-		headroom = largeContextWindowBuffer
-	} else {
-		headroom = int64(float64(contextWindow) * smallContextWindowRatio)
-	}
-	return min(headroom+max(maxOutputTokens, 0), contextWindow/2)
 }
 
 // contextTokens returns the size of the prompt the provider processed for
@@ -2500,6 +2688,32 @@ func (a *sessionAgent) Model() Model {
 	return a.largeModel.Get()
 }
 
+// runModel returns the large model a turn runs on: the one pinned on the
+// call, or else the agent's current large model.
+func (a *sessionAgent) runModel(call SessionAgentCall) Model {
+	if call.Model != nil {
+		return *call.Model
+	}
+	return a.largeModel.Get()
+}
+
+// pinnedModelProvider returns the fantasy ModelProvider for a run pinned
+// to pinned. fantasy calls it on every step attempt. While the agent's
+// live large model is still the same provider and model, the live client
+// is returned: an OnAuthRefresh rebuilds the models (UpdateModels) and
+// the retry must pick up the refreshed credentials. Once the selection
+// has moved to a different model, the run keeps its pinned one.
+func (a *sessionAgent) pinnedModelProvider(pinned Model) func() fantasy.LanguageModel {
+	return func() fantasy.LanguageModel {
+		if live := a.largeModel.Get(); live.Model != nil &&
+			live.ModelCfg.Provider == pinned.ModelCfg.Provider &&
+			live.ModelCfg.Model == pinned.ModelCfg.Model {
+			return live.Model
+		}
+		return pinned.Model
+	}
+}
+
 // convertToToolResult converts a fantasy tool result to a message tool result.
 func (a *sessionAgent) convertToToolResult(result fantasy.ToolResultContent) message.ToolResult {
 	baseResult := message.ToolResult{
@@ -2650,10 +2864,50 @@ func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Mes
 	return convertedMessages
 }
 
+// summaryInputToolResultLimit is how many characters of each tool result the
+// summarizing model sees.
+const summaryInputToolResultLimit = 2000
+
+// summaryInputMessages returns a copy of msgs prepared for the summary
+// request: reasoning parts are dropped, tool-result text longer than
+// summaryInputToolResultLimit is cut with a marker, and a previous
+// summary loses its file lists, which are carried forward separately.
+// msgs is not modified.
+func summaryInputMessages(msgs []message.Message) []message.Message {
+	out := make([]message.Message, len(msgs))
+	for i, m := range msgs {
+		parts := make([]message.ContentPart, 0, len(m.Parts))
+		for _, part := range m.Parts {
+			switch p := part.(type) {
+			case message.ReasoningContent:
+				continue
+			case message.TextContent:
+				if m.IsSummaryMessage {
+					p.Text = stripSummaryFileLists(p.Text)
+				}
+				part = p
+			case message.ToolResult:
+				if n := len(p.Content); n > summaryInputToolResultLimit {
+					cut := summaryInputToolResultLimit
+					for cut > 0 && !utf8.RuneStart(p.Content[cut]) {
+						cut--
+					}
+					p.Content = fmt.Sprintf("%s\n[... %d more chars omitted for summary]", p.Content[:cut], n-cut)
+				}
+				part = p
+			}
+			parts = append(parts, part)
+		}
+		m.Parts = parts
+		out[i] = m
+	}
+	return out
+}
+
 // buildSummaryPrompt constructs the prompt text for session summarization.
 func buildSummaryPrompt(todos []session.Todo) string {
 	var sb strings.Builder
-	sb.WriteString("Provide a detailed summary of our conversation above.")
+	sb.WriteString("Summarize the conversation above using the required sections, in order: Goal; Constraints & Preferences; Progress (Done / In progress / Blocked); Key Decisions; Next Steps; Critical Context.")
 	if len(todos) > 0 {
 		sb.WriteString("\n\n## Current Todo List\n\n")
 		for _, t := range todos {
@@ -2680,6 +2934,58 @@ func providerRetryLogFields(err *fantasy.ProviderError, delay time.Duration) []a
 		fields = append(fields, "message", err.Message)
 	}
 	return fields
+}
+
+// truncatedToolCallError is the result a tool call gets when the response
+// that carried it hit the output token limit.
+const truncatedToolCallError = "Tool call skipped: the response was cut off by the output token limit before the call was complete. Retry with a shorter call."
+
+// truncatedToolCallPrompt is the hidden prompt that continues a turn whose
+// tool calls were cut off by the output token limit.
+const truncatedToolCallPrompt = "Your last tool call was cut off by the output token limit and did not run. Continue the task, retrying it with a shorter call."
+
+// truncatedToolCalls returns the client-side tool calls of a step that
+// stopped on the output token limit. Their arguments may be cut short, so
+// they must not run. Fantasy already skips dispatching them, but leaves
+// them without results.
+func truncatedToolCalls(step fantasy.StepResult) []fantasy.ToolCallContent {
+	if step.FinishReason != fantasy.FinishReasonLength {
+		return nil
+	}
+	var calls []fantasy.ToolCallContent
+	for _, tc := range step.Content.ToolCalls() {
+		if !tc.ProviderExecuted {
+			calls = append(calls, tc)
+		}
+	}
+	return calls
+}
+
+// failTruncatedToolCalls records an error result for each tool call cut
+// off by the output token limit, so the model sees why the call did not
+// run and retries with a shorter one, instead of an "interrupted" result.
+func (a *sessionAgent) failTruncatedToolCalls(ctx context.Context, assistant *message.Message, step fantasy.StepResult) error {
+	for _, tc := range truncatedToolCalls(step) {
+		input, _ := sanitizeToolInput(tc.ToolName, tc.ToolCallID, tc.Input)
+		assistant.AddToolCall(message.ToolCall{
+			ID:       tc.ToolCallID,
+			Name:     tc.ToolName,
+			Input:    input,
+			Finished: true,
+		})
+		if _, err := a.messages.Create(ctx, assistant.SessionID, message.CreateMessageParams{
+			Role: message.Tool,
+			Parts: []message.ContentPart{message.ToolResult{
+				ToolCallID: tc.ToolCallID,
+				Name:       tc.ToolName,
+				Content:    truncatedToolCallError,
+				IsError:    true,
+			}},
+		}); err != nil {
+			return fmt.Errorf("failed to record truncated tool call: %w", err)
+		}
+	}
+	return nil
 }
 
 // sanitizeToolInput validates tool call JSON from the provider.

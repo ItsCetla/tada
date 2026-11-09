@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
+	"github.com/charmbracelet/crush/internal/claudecode"
 	"github.com/charmbracelet/crush/internal/clipboard"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/control"
@@ -96,6 +97,46 @@ type App struct {
 	// herdrClient reports agent state to herdr when running inside
 	// a herdr-managed pane. Nil when not in a herdr environment.
 	herdrClient *herdr.Client
+}
+
+// LoadSkillOverrides reads the repository-scoped skill overrides (set from
+// the Toggle Skills dialog's Local scope) from the project database into
+// store, so skills discovery and the system prompt honour them. Callers run
+// it before discovering skills. A read failure only means the overrides are
+// skipped and the config alone decides.
+func LoadSkillOverrides(ctx context.Context, conn *sql.DB, store *config.ConfigStore) {
+	q := db.New(conn)
+	disabled, err := q.ListDisabledSkills(ctx)
+	if err != nil {
+		slog.Warn("Failed to list disabled skill overrides; using the config only", "error", err)
+		return
+	}
+	enabled, err := q.ListEnabledSkills(ctx)
+	if err != nil {
+		slog.Warn("Failed to list enabled skill overrides; using the config only", "error", err)
+		return
+	}
+	store.SetLocalSkillOverrides(disabled, enabled)
+}
+
+// SetLocalSkillDisabled records a repository-scoped skill override and
+// refreshes store's copy of the overrides, so the next agent turn and
+// every EffectiveDisabledSkills reader see it. Config files are never
+// touched.
+func SetLocalSkillDisabled(ctx context.Context, s session.Service, store *config.ConfigStore, name string, disabled bool) error {
+	if err := s.SetSkillDisabled(ctx, name, disabled); err != nil {
+		return err
+	}
+	localDisabled, err := s.SkillsDisabled(ctx)
+	if err != nil {
+		return err
+	}
+	localEnabled, err := s.SkillsEnabled(ctx)
+	if err != nil {
+		return err
+	}
+	store.SetLocalSkillOverrides(localDisabled, localEnabled)
+	return nil
 }
 
 // New initializes a new application instance. skillsMgr carries the
@@ -436,7 +477,7 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 	done := make(chan response, 1)
 
 	go func(ctx context.Context, sessionID, prompt string) {
-		result, err := app.AgentCoordinator.Run(ctx, sess.ID, prompt)
+		result, err := app.AgentCoordinator.Run(agent.WithHeadless(ctx), sess.ID, prompt)
 		if err != nil {
 			done <- response{
 				err: fmt.Errorf("failed to start agent processing stream: %w", err),
@@ -1007,6 +1048,9 @@ func (app *App) Shutdown() {
 	wg.Go(func() {
 		app.LSPManager.KillAll(shutdownCtx)
 	})
+
+	// Stop the Claude Code CLI processes kept alive between turns.
+	wg.Go(claudecode.DefaultPool.Close)
 
 	// Call all cleanup functions.
 	for _, cleanup := range app.cleanupFuncs {

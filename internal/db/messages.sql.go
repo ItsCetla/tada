@@ -304,7 +304,7 @@ SELECT m.id, m.session_id, m.role, m.parts, m.model, m.created_at, m.updated_at,
 FROM messages m
 WHERE m.session_id = ?
   AND m.created_at >= (SELECT s.created_at FROM messages s WHERE s.id = ?)
-ORDER BY m.created_at ASC
+ORDER BY m.created_at ASC, m.rowid ASC
 `
 
 type ListMessagesBySessionFromSummaryParams struct {
@@ -433,5 +433,23 @@ func (q *Queries) UpdateMessage(ctx context.Context, arg UpdateMessageParams) er
 		arg.FinishedAt,
 		arg.ID,
 	)
+	return err
+}
+
+const updateMessageCreatedAt = `-- name: UpdateMessageCreatedAt :exec
+UPDATE messages
+SET created_at = ?
+WHERE id = ?
+`
+
+type UpdateMessageCreatedAtParams struct {
+	CreatedAt int64  `json:"created_at"`
+	ID        string `json:"id"`
+}
+
+// Moves a message in the session order; compaction uses it to place a
+// summary right before the messages it keeps verbatim.
+func (q *Queries) UpdateMessageCreatedAt(ctx context.Context, arg UpdateMessageCreatedAtParams) error {
+	_, err := q.exec(ctx, q.updateMessageCreatedAtStmt, updateMessageCreatedAt, arg.CreatedAt, arg.ID)
 	return err
 }

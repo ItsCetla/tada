@@ -664,7 +664,8 @@ func BenchmarkBuildSummaryPrompt(b *testing.B) {
 
 func TestPreparePrompt_FiltersImageAttachments(t *testing.T) {
 	env := testEnv(t)
-	sa := testSessionAgent(env, nil, nil, "test prompt")
+	// The todos tool turns on the empty todo list reminder at history[0].
+	sa := testSessionAgent(env, nil, nil, "test prompt", &fakeTool{name: tools.TodosToolName})
 	agent := sa.(*sessionAgent)
 
 	ctx := t.Context()

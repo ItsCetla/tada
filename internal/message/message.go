@@ -52,6 +52,9 @@ type Service interface {
 	// ListFromSummary returns the messages at or after summaryMessageID,
 	// which is all a compacted session still sends.
 	ListFromSummary(ctx context.Context, sessionID, summaryMessageID string) ([]Message, error)
+	// SetCreatedAt moves a message in the session order. Compaction uses
+	// it to place a summary right before the messages it keeps.
+	SetCreatedAt(ctx context.Context, id string, createdAt int64) error
 	ListUserMessages(ctx context.Context, sessionID string) ([]Message, error)
 	ListAllUserMessages(ctx context.Context) ([]Message, error)
 	GetLastAssistantMessage(ctx context.Context, sessionID string) (Message, error)
@@ -548,6 +551,35 @@ func (s *service) ListFromSummary(ctx context.Context, sessionID, summaryMessage
 		}
 	}
 	return messages, nil
+}
+
+func (s *service) SetCreatedAt(ctx context.Context, id string, createdAt int64) error {
+	if err := s.q.UpdateMessageCreatedAt(ctx, db.UpdateMessageCreatedAtParams{
+		CreatedAt: createdAt,
+		ID:        id,
+	}); err != nil {
+		return err
+	}
+	// Publish the moved message so subscribers can reorder it. A pending
+	// update is newer than the stored row, so it is patched and sent
+	// instead.
+	s.mu.Lock()
+	var msg Message
+	found := false
+	if p, ok := s.pending[id]; ok && p.dirty {
+		p.latest.CreatedAt = createdAt
+		msg = p.latest.Clone()
+		found = true
+	}
+	s.mu.Unlock()
+	if !found {
+		var err error
+		if msg, err = s.Get(ctx, id); err != nil {
+			return err
+		}
+	}
+	s.Publish(pubsub.UpdatedEvent, msg)
+	return nil
 }
 
 func (s *service) ListUserMessages(ctx context.Context, sessionID string) ([]Message, error) {
