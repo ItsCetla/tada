@@ -301,7 +301,7 @@ func writeMCP(b *strings.Builder, states map[string]mcp.ClientInfo, cfg *config.
 func writeSkills(b *strings.Builder, allSkills []*skills.Skill, activeSkills []*skills.Skill, tracker *skills.Tracker, cfg *config.ConfigStore) {
 	var disabled []string
 	if cfg.Config().Options != nil {
-		disabled = cfg.Config().Options.DisabledSkills
+		disabled = cfg.EffectiveDisabledSkills()
 	}
 	if len(activeSkills) == 0 && len(disabled) == 0 {
 		return

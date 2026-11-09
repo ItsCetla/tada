@@ -21,8 +21,13 @@ import (
 // inflate the session forever.
 const (
 	maxPersistedLines = 2000
-	maxPersistedBytes = 50 << 10
+	maxPersistedBytes = MaxOutputBytes
 )
+
+// MaxOutputBytes is the shared byte cap for command and tool output sent to
+// the model. Agent tools that can emit unbounded output (bash, grep) cap
+// their output at this size.
+const MaxOutputBytes = 50 << 10
 
 // spillSubdir is where oversized command output is parked, relative to the
 // caller-supplied data directory.

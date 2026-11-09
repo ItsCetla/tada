@@ -1,6 +1,6 @@
 ---
 name: tada-hooks
-description: Use when the user wants to add, write, debug, or configure a Ta-Da hook — gating or blocking tool calls, approving or rewriting tool input before execution, injecting context into tool results, or troubleshooting hook behavior in tada.json.
+description: Use to add, write, debug or configure a Ta-Da hook that gates, rewrites or adds context to tool calls.
 ---
 
 # Ta-Da Hooks

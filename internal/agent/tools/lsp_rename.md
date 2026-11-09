@@ -1,1 +1,1 @@
-Rename a symbol across all files using LSP rename. Prefer this over manual multi-file `edit` for any rename: it performs a true semantic rename that respects scopes, overloads, and imports automatically. Returns the list of changed files and locations.
+Rename a symbol across all files with an LSP semantic rename. Use this instead of `edit`/`multiedit` for any rename: it respects scopes, overloads, and imports. Returns the changed files and locations; no need to re-read them to confirm.

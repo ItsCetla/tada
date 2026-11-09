@@ -90,7 +90,7 @@ func TestReadTextFileTruncatesLongLines(t *testing.T) {
 	content, hasMore, err := readTextFile(filePath, 0, 1, 0)
 	require.NoError(t, err)
 	require.False(t, hasMore)
-	require.Equal(t, strings.Repeat("a", MaxLineLength)+"...", content)
+	require.Equal(t, strings.Repeat("a", MaxLineLength)+lineTruncatedSuffix, content)
 }
 
 func TestReadTextFileLineExceeding1MB(t *testing.T) {
@@ -105,7 +105,7 @@ func TestReadTextFileLineExceeding1MB(t *testing.T) {
 	content, hasMore, err := readTextFile(filePath, 0, 1, 0)
 	require.NoError(t, err)
 	require.False(t, hasMore)
-	require.Equal(t, strings.Repeat("A", MaxLineLength)+"...", content)
+	require.Equal(t, strings.Repeat("A", MaxLineLength)+lineTruncatedSuffix, content)
 }
 
 func TestViewToolAllowsSmallSectionsOfLargeFiles(t *testing.T) {

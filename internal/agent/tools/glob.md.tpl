@@ -1,1 +1,1 @@
-Find files by name/pattern (glob syntax), sorted by modification time; max {{ .MaxResults }} results; skips hidden files. Use grep to search file contents.
+Find files by glob pattern, newest first; skips hidden files. Capped at {{ .MaxResults }} results; narrow the pattern or path to see more. Use grep for contents.

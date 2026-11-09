@@ -31,19 +31,22 @@ var globDescriptionTpl = template.Must(
 		Parse(string(globDescriptionTmpl)),
 )
 
+// maxGlobResults caps how many paths one glob call returns.
+const maxGlobResults = 100
+
 type globDescriptionData struct {
 	MaxResults int
 }
 
 func globDescription() string {
 	return renderTemplate(globDescriptionTpl, globDescriptionData{
-		MaxResults: 100,
+		MaxResults: maxGlobResults,
 	})
 }
 
 type GlobParams struct {
-	Pattern string `json:"pattern" description:"The glob pattern to match files against"`
-	Path    string `json:"path,omitempty" description:"The directory to search in. Defaults to the current working directory."`
+	Pattern string `json:"pattern" description:"Glob pattern"`
+	Path    string `json:"path,omitempty" description:"Directory (default: cwd)"`
 }
 
 type GlobResponseMetadata struct {
@@ -52,7 +55,7 @@ type GlobResponseMetadata struct {
 }
 
 func NewGlobTool(workingDir string, cfg config.ToolGlob) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
+	return fantasy.NewParallelAgentTool(
 		GlobToolName,
 		globDescription(),
 		func(ctx context.Context, params GlobParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
@@ -69,7 +72,7 @@ func NewGlobTool(workingDir string, cfg config.ToolGlob) fantasy.AgentTool {
 			searchCtx, cancel := context.WithTimeout(ctx, cfg.GetTimeout())
 			defer cancel()
 
-			files, truncated, err := globFiles(searchCtx, params.Pattern, searchPath, 100)
+			files, truncated, err := globFiles(searchCtx, params.Pattern, searchPath, maxGlobResults)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("error finding files: %v", err)), nil
 			}
@@ -81,7 +84,7 @@ func NewGlobTool(workingDir string, cfg config.ToolGlob) fantasy.AgentTool {
 				normalizeFilePaths(files)
 				output = strings.Join(files, "\n")
 				if truncated {
-					output += "\n\n(Results are truncated. Consider using a more specific path or pattern.)"
+					output += "\n\n" + globTruncationNotice(len(files))
 				}
 			}
 
@@ -94,6 +97,12 @@ func NewGlobTool(workingDir string, cfg config.ToolGlob) fantasy.AgentTool {
 			), nil
 		},
 	)
+}
+
+// globTruncationNotice states the cap and how to reach the rest. The glob
+// walk stops early, so the total number of matches is not known.
+func globTruncationNotice(shown int) string {
+	return fmt.Sprintf("[Showing first %d matches; more exist. Narrow the pattern or path to see the rest.]", shown)
 }
 
 func globFiles(ctx context.Context, pattern, searchPath string, limit int) ([]string, bool, error) {

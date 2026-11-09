@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	_ "embed"
 	"errors"
@@ -36,19 +37,21 @@ var viewDescriptionTpl = template.Must(
 type viewDescriptionData struct {
 	DefaultReadLimit int
 	MaxViewSizeKB    int
+	MaxLineLength    int
 }
 
 func viewDescription() string {
 	return renderTemplate(viewDescriptionTpl, viewDescriptionData{
 		DefaultReadLimit: DefaultReadLimit,
 		MaxViewSizeKB:    MaxViewSize / 1024,
+		MaxLineLength:    MaxLineLength,
 	})
 }
 
 type ViewParams struct {
-	FilePath string `json:"file_path" description:"The path to the file to read"`
-	Offset   int    `json:"offset,omitempty" description:"The line number to start reading from (0-based)"`
-	Limit    int    `json:"limit,omitempty" description:"The number of lines to read (defaults to 200)"`
+	FilePath string `json:"file_path" description:"File path"`
+	Offset   int    `json:"offset,omitempty" description:"Start line (0-based)"`
+	Limit    int    `json:"limit,omitempty" description:"Lines to read (default 200)"`
 }
 
 type ViewPermissionsParams struct {
@@ -82,6 +85,8 @@ const (
 type contentTooLargeError struct {
 	Size int
 	Max  int
+	// Lines is how many lines fit under Max before the cut.
+	Lines int
 }
 
 func (e contentTooLargeError) Error() string {
@@ -96,7 +101,7 @@ func NewViewTool(
 	workingDir string,
 	skillsPaths ...string,
 ) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
+	return fantasy.NewParallelAgentTool(
 		ViewToolName,
 		viewDescription(),
 		func(ctx context.Context, params ViewParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
@@ -238,8 +243,8 @@ func NewViewTool(
 			if err != nil {
 				var tooLarge contentTooLargeError
 				if errors.As(err, &tooLarge) {
-					return fantasy.NewTextErrorResponse(fmt.Sprintf("Content section is too large (%d bytes). Maximum size is %d bytes",
-						tooLarge.Size, tooLarge.Max)), nil
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("Content section is too large (%d bytes). Maximum size is %d bytes. Use a smaller limit (limit=%d fits) with offset=%d, or grep for what you need.",
+						tooLarge.Size, tooLarge.Max, max(tooLarge.Lines, 1), params.Offset)), nil
 				}
 				return fantasy.ToolResponse{}, fmt.Errorf("error reading file: %w", err)
 			}
@@ -253,8 +258,12 @@ func NewViewTool(
 			output += addLineNumbers(content, params.Offset+1)
 
 			if hasMore {
-				output += fmt.Sprintf("\n\n(File has more lines. Use 'offset' parameter to read beyond line %d)",
-					params.Offset+len(strings.Split(content, "\n")))
+				last := params.Offset + strings.Count(content, "\n") + 1
+				total := -1
+				if fileInfo.Size() <= maxLineCountSize {
+					total = countFileLines(filePath)
+				}
+				output += "\n\n" + viewContinuationNotice(params.Offset+1, last, total)
 			}
 			output += "\n</file>\n"
 			output += getDiagnostics(filePath, lspManager)
@@ -306,6 +315,51 @@ func addLineNumbers(content string, startLine int) string {
 	return strings.Join(result, "\n")
 }
 
+// maxLineCountSize bounds the extra pass that counts a file's lines for the
+// continuation notice, so huge logs are not scanned end to end.
+const maxLineCountSize = 64 * 1024 * 1024
+
+// viewContinuationNotice tells the model which lines it got and the offset
+// to pass next. first and last are 1-indexed; offset is 0-based, so the next
+// call starts at offset=last. A negative total means it was not counted.
+func viewContinuationNotice(first, last, total int) string {
+	if total < 0 {
+		return fmt.Sprintf("[Showing lines %d-%d; more follow. Use offset=%d to continue.]", first, last, last)
+	}
+	return fmt.Sprintf("[Showing lines %d-%d of %d. Use offset=%d to continue.]", first, last, total, last)
+}
+
+// countFileLines counts lines the way readTextFile splits them, returning
+// -1 when the file cannot be read.
+func countFileLines(filePath string) int {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return -1
+	}
+	defer file.Close()
+
+	buf := make([]byte, 64*1024)
+	count := 0
+	var last byte
+	for {
+		n, err := file.Read(buf)
+		if n > 0 {
+			count += bytes.Count(buf[:n], []byte{'\n'})
+			last = buf[n-1]
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return -1
+		}
+	}
+	if last != '\n' {
+		count++
+	}
+	return count
+}
+
 func readTextFile(filePath string, offset, limit, maxContentSize int) (string, bool, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -336,17 +390,13 @@ func readTextFile(filePath string, offset, limit, maxContentSize int) (string, b
 		}
 		lineText = strings.TrimSuffix(lineText, "\n")
 		lineText = strings.TrimSuffix(lineText, "\r")
-		if len(lineText) > MaxLineLength {
-			// Truncate at a rune boundary to avoid splitting
-			// multi-byte characters.
-			lineText = strings.ToValidUTF8(lineText[:MaxLineLength], "") + "..."
-		}
+		lineText = truncateLine(lineText, MaxLineLength)
 		projectedSize := contentSize + len(lineText)
 		if len(lines) > 0 {
 			projectedSize++
 		}
 		if maxContentSize > 0 && projectedSize > maxContentSize {
-			return "", false, contentTooLargeError{Size: projectedSize, Max: maxContentSize}
+			return "", false, contentTooLargeError{Size: projectedSize, Max: maxContentSize, Lines: len(lines)}
 		}
 		contentSize = projectedSize
 		lines = append(lines, lineText)
@@ -463,6 +513,7 @@ func readBuiltinFile(params ViewParams, skillTracker *skills.Tracker) (fantasy.T
 	}
 
 	lines := strings.Split(content, "\n")
+	totalLines := len(lines)
 	offset := min(params.Offset, len(lines))
 	lines = lines[offset:]
 
@@ -474,8 +525,7 @@ func readBuiltinFile(params ViewParams, skillTracker *skills.Tracker) (fantasy.T
 	output := "<file>\n"
 	output += addLineNumbers(strings.Join(lines, "\n"), offset+1)
 	if hasMore {
-		output += fmt.Sprintf("\n\n(File has more lines. Use 'offset' parameter to read beyond line %d)",
-			offset+len(lines))
+		output += "\n\n" + viewContinuationNotice(offset+1, offset+len(lines), totalLines)
 	}
 	output += "\n</file>\n"
 

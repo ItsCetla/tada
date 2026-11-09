@@ -19,8 +19,8 @@ import (
 var agentToolDescription string
 
 type AgentParams struct {
-	Prompt  string `json:"prompt" description:"The task for the agent to perform"`
-	Machine string `json:"machine,omitempty" description:"Where to run: auto (default), main, or a machine name"`
+	Prompt  string `json:"prompt" description:"Task for the agent"`
+	Machine string `json:"machine,omitempty" description:"auto (default), main or a machine name"`
 }
 
 const (

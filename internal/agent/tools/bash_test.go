@@ -220,7 +220,7 @@ func TestTruncateOutputValidUTF8(t *testing.T) {
 
 	out := TruncateOutput(content, t.TempDir())
 	require.True(t, utf8.ValidString(out), "truncated output must stay valid UTF-8")
-	require.Contains(t, out, "lines truncated")
+	require.Contains(t, out, "[Showing first and last 15000 chars of")
 }
 
 func TestTruncateOutputShortContent(t *testing.T) {
@@ -236,5 +236,5 @@ func TestTruncateOutputEmoji(t *testing.T) {
 
 	out := TruncateOutput(content, t.TempDir())
 	require.True(t, utf8.ValidString(out), "truncated output must stay valid UTF-8")
-	require.Contains(t, out, "lines truncated")
+	require.Contains(t, out, "[Showing first and last 15000 chars of")
 }

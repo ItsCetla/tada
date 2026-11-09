@@ -23,8 +23,8 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/csync"
 	"github.com/charmbracelet/crush/internal/fsext"
+	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/workdir"
-	"github.com/charmbracelet/x/ansi"
 )
 
 // regexCache provides thread-safe caching of compiled regex patterns
@@ -68,10 +68,10 @@ var (
 )
 
 type GrepParams struct {
-	Pattern     string `json:"pattern" description:"The regex pattern to search for in file contents"`
-	Path        string `json:"path,omitempty" description:"The directory to search in. Defaults to the current working directory."`
-	Include     string `json:"include,omitempty" description:"File pattern to include in the search (e.g. \"*.js\", \"*.{ts,tsx}\")"`
-	LiteralText bool   `json:"literal_text,omitempty" description:"If true, the pattern will be treated as literal text with special regex characters escaped. Default is false."`
+	Pattern     string `json:"pattern" description:"Regex to search for"`
+	Path        string `json:"path,omitempty" description:"Directory (default: cwd)"`
+	Include     string `json:"include,omitempty" description:"File glob, e.g. \"*.{ts,tsx}\""`
+	LiteralText bool   `json:"literal_text,omitempty" description:"Match pattern as literal text"`
 }
 
 type grepMatch struct {
@@ -88,8 +88,13 @@ type GrepResponseMetadata struct {
 }
 
 const (
-	GrepToolName        = "grep"
-	maxGrepContentWidth = 500
+	GrepToolName = "grep"
+	// maxGrepMatches caps how many matches one grep call returns.
+	maxGrepMatches = 100
+	// maxGrepLineLength caps each matching line, in bytes.
+	maxGrepLineLength = 500
+	// maxGrepOutputBytes caps the whole output, matching bash.
+	maxGrepOutputBytes = shell.MaxOutputBytes
 )
 
 //go:embed grep.md.tpl
@@ -101,12 +106,16 @@ var grepDescriptionTpl = template.Must(
 )
 
 type grepDescriptionData struct {
-	MaxResults int
+	MaxResults    int
+	MaxLineLength int
+	MaxOutputKB   int
 }
 
 func grepDescription() string {
 	return renderTemplate(grepDescriptionTpl, grepDescriptionData{
-		MaxResults: 100,
+		MaxResults:    maxGrepMatches,
+		MaxLineLength: maxGrepLineLength,
+		MaxOutputKB:   maxGrepOutputBytes / 1024,
 	})
 }
 
@@ -123,7 +132,7 @@ func escapeRegexPattern(pattern string) string {
 }
 
 func NewGrepTool(workingDir string, config config.ToolGrep) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
+	return fantasy.NewParallelAgentTool(
 		GrepToolName,
 		grepDescription(),
 		func(ctx context.Context, params GrepParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
@@ -142,7 +151,8 @@ func NewGrepTool(workingDir string, config config.ToolGrep) fantasy.AgentTool {
 			searchCtx, cancel := context.WithTimeout(ctx, config.GetTimeout())
 			defer cancel()
 
-			matches, truncated, err := searchFiles(searchCtx, searchPattern, searchPath, params.Include, 100)
+			matches, total, err := searchFilesWithTotal(searchCtx, searchPattern, searchPath, params.Include, maxGrepMatches)
+			truncated := total > len(matches)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("error searching files: %v", err)), nil
 			}
@@ -152,33 +162,13 @@ func NewGrepTool(workingDir string, config config.ToolGrep) fantasy.AgentTool {
 				output.WriteString("No files found")
 			} else {
 				fmt.Fprintf(&output, "Found %d matches\n", len(matches))
-
-				currentFile := ""
-				for _, match := range matches {
-					if currentFile != match.path {
-						if currentFile != "" {
-							output.WriteString("\n")
-						}
-						currentFile = match.path
-						fmt.Fprintf(&output, "%s:\n", filepath.ToSlash(match.path))
-					}
-					if match.lineNum > 0 {
-						lineText := match.lineText
-						if ansi.StringWidth(lineText) > maxGrepContentWidth {
-							lineText = ansi.Truncate(lineText, maxGrepContentWidth, "...")
-						}
-						if match.charNum > 0 {
-							fmt.Fprintf(&output, "  Line %d, Char %d: %s\n", match.lineNum, match.charNum, lineText)
-						} else {
-							fmt.Fprintf(&output, "  Line %d: %s\n", match.lineNum, lineText)
-						}
-					} else {
-						fmt.Fprintf(&output, "  %s\n", match.path)
-					}
-				}
-
-				if truncated {
-					output.WriteString("\n(Results are truncated. Consider using a more specific path or pattern.)")
+				shown := writeGrepMatches(&output, matches, maxGrepOutputBytes)
+				switch {
+				case shown < len(matches):
+					truncated = true
+					output.WriteString("\n" + grepByteCapNotice(shown, total, maxGrepOutputBytes))
+				case truncated:
+					output.WriteString("\n" + grepTruncationNotice(len(matches), total))
 				}
 			}
 
@@ -193,12 +183,60 @@ func NewGrepTool(workingDir string, config config.ToolGrep) fantasy.AgentTool {
 	)
 }
 
+// writeGrepMatches writes matches grouped by file, stopping before the
+// output would exceed maxBytes. It returns how many matches were written.
+func writeGrepMatches(output *strings.Builder, matches []grepMatch, maxBytes int) int {
+	var entry strings.Builder
+	currentFile := ""
+	for i, match := range matches {
+		entry.Reset()
+		if currentFile != match.path {
+			if currentFile != "" {
+				entry.WriteString("\n")
+			}
+			fmt.Fprintf(&entry, "%s:\n", filepath.ToSlash(match.path))
+		}
+		switch {
+		case match.lineNum > 0 && match.charNum > 0:
+			fmt.Fprintf(&entry, "  Line %d, Char %d: %s\n", match.lineNum, match.charNum, truncateLine(match.lineText, maxGrepLineLength))
+		case match.lineNum > 0:
+			fmt.Fprintf(&entry, "  Line %d: %s\n", match.lineNum, truncateLine(match.lineText, maxGrepLineLength))
+		default:
+			fmt.Fprintf(&entry, "  %s\n", match.path)
+		}
+		if output.Len()+entry.Len() > maxBytes {
+			return i
+		}
+		output.WriteString(entry.String())
+		currentFile = match.path
+	}
+	return len(matches)
+}
+
+// grepByteCapNotice states how many matches fit under the output byte cap.
+func grepByteCapNotice(shown, total, maxBytes int) string {
+	return fmt.Sprintf("[Showing first %d of %d matches; output capped at %dKB. Narrow the pattern or path, or set include, to see the rest.]", shown, total, maxBytes/1024)
+}
+
+// grepTruncationNotice states how many matches were shown out of how many,
+// and how to reach the rest.
+func grepTruncationNotice(shown, total int) string {
+	return fmt.Sprintf("[Showing first %d of %d matches. Narrow the pattern or path, or set include, to see the rest.]", shown, total)
+}
+
 func searchFiles(ctx context.Context, pattern, rootPath, include string, limit int) ([]grepMatch, bool, error) {
+	matches, total, err := searchFilesWithTotal(ctx, pattern, rootPath, include, limit)
+	return matches, total > len(matches), err
+}
+
+// searchFilesWithTotal returns at most limit matches, newest file first,
+// along with the number of matches found before the cut.
+func searchFilesWithTotal(ctx context.Context, pattern, rootPath, include string, limit int) ([]grepMatch, int, error) {
 	matches, err := searchWithRipgrep(ctx, pattern, rootPath, include)
 	if err != nil {
 		matches, err = searchFilesWithRegex(pattern, rootPath, include)
 		if err != nil {
-			return nil, false, err
+			return nil, 0, err
 		}
 	}
 
@@ -209,12 +247,12 @@ func searchFiles(ctx context.Context, pattern, rootPath, include string, limit i
 		return matches[i].modTime.After(matches[j].modTime)
 	})
 
-	truncated := len(matches) > limit
-	if truncated {
+	total := len(matches)
+	if total > limit {
 		matches = matches[:limit]
 	}
 
-	return matches, truncated, nil
+	return matches, total, nil
 }
 
 func searchWithRipgrep(ctx context.Context, pattern, path, include string) ([]grepMatch, error) {

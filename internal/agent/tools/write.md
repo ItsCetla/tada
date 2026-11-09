@@ -1,1 +1,1 @@
-Create or overwrite a file with given content; auto-creates parent dirs. Cannot append. Read the file first to avoid conflicts. For surgical changes use edit or multiedit.
+Create or overwrite a file, creating parent dirs; cannot append. View an existing file before overwriting it. For targeted changes use edit or multiedit.

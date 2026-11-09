@@ -1,1 +1,1 @@
-Read a file by path with line numbers; supports offset and line limit (default {{ .DefaultReadLimit }}, max {{ .MaxViewSizeKB }}KB returned file content section); renders images (PNG, JPEG, GIF, WebP); use ls for directories.
+Read a file with line numbers; renders images (PNG, JPEG, GIF, WebP); use ls for directories. Shows up to {{ .DefaultReadLimit }} lines or {{ .MaxViewSizeKB }}KB, lines over {{ .MaxLineLength }} bytes cut; use offset (0-based) and limit to read the rest of large files. Don't re-read unchanged files.

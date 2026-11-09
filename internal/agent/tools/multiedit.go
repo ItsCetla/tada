@@ -3,10 +3,12 @@ package tools
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"charm.land/fantasy"
@@ -21,14 +23,14 @@ import (
 )
 
 type MultiEditOperation struct {
-	OldString  string `json:"old_string" description:"The text to replace"`
-	NewString  string `json:"new_string" description:"The text to replace it with"`
-	ReplaceAll bool   `json:"replace_all,omitempty" description:"Replace all occurrences of old_string (default false)."`
+	OldString  string `json:"old_string" description:"Exact text to replace"`
+	NewString  string `json:"new_string" description:"Replacement text"`
+	ReplaceAll bool   `json:"replace_all,omitempty" description:"Replace every match"`
 }
 
 type MultiEditParams struct {
-	FilePath string               `json:"file_path" description:"The absolute path to the file to modify"`
-	Edits    []MultiEditOperation `json:"edits" description:"Array of edit operations to perform sequentially on the file"`
+	FilePath string               `json:"file_path" description:"Absolute file path"`
+	Edits    []MultiEditOperation `json:"edits"`
 }
 
 type MultiEditPermissionsParams struct {
@@ -129,26 +131,143 @@ func validateEdits(edits []MultiEditOperation) error {
 	return nil
 }
 
-// applyEditsToContent applies edits sequentially, collecting the ones that
-// failed. It also reports whether any edit only matched after whitespace
+// editSpan is one byte range of the original content that an edit replaces.
+type editSpan struct {
+	start, end  int
+	replacement string
+	index       int // 1-based edit index, for error messages.
+}
+
+// applyEditsToContent matches every edit against the original content, then
+// applies all replacements at once. Edits never see each other's results, so
+// their order does not matter. If any edit fails to match, matches more than
+// once without replace_all, changes nothing, or overlaps another edit, no
+// edit is applied: the original content is returned along with every
+// failure. It also reports whether any edit only matched after whitespace
 // normalization.
-func applyEditsToContent(currentContent string, edits []MultiEditOperation, startIndex int) (string, []FailedEdit, bool) {
-	var failedEdits []FailedEdit
-	var whitespaceCorrected bool
+func applyEditsToContent(content string, edits []MultiEditOperation, startIndex int) (string, []FailedEdit, bool) {
+	var (
+		failedEdits         []FailedEdit
+		spans               []editSpan
+		whitespaceCorrected bool
+	)
 	for i, edit := range edits {
-		newContent, corrected, err := applyEditToContent(currentContent, edit)
+		index := startIndex + i + 1
+		editSpans, corrected, err := locateEdit(content, edit, index)
 		if err != nil {
-			failedEdits = append(failedEdits, FailedEdit{
-				Index: startIndex + i + 1,
-				Error: err.Error(),
-				Edit:  edit,
-			})
+			failedEdits = append(failedEdits, FailedEdit{Index: index, Error: err.Error(), Edit: edit})
 			continue
 		}
 		whitespaceCorrected = whitespaceCorrected || corrected
-		currentContent = newContent
+		spans = append(spans, editSpans...)
 	}
-	return currentContent, failedEdits, whitespaceCorrected
+
+	slices.SortStableFunc(spans, func(a, b editSpan) int { return a.start - b.start })
+	overlapping := map[int]bool{}
+	for i := 1; i < len(spans); i++ {
+		prev, cur := spans[i-1], spans[i]
+		// Compare against the furthest-reaching earlier span, so an edit
+		// nested inside a non-adjacent span is still caught.
+		for j := i - 2; j >= 0 && spans[j].end > prev.end; j-- {
+			prev = spans[j]
+		}
+		if prev.end <= cur.start || overlapping[cur.index] {
+			continue
+		}
+		overlapping[cur.index] = true
+		failedEdits = append(failedEdits, FailedEdit{
+			Index: cur.index,
+			Error: fmt.Sprintf("edit %d overlaps edit %d in the original file. Merge them into one edit or target disjoint regions", cur.index, prev.index),
+			Edit:  edits[cur.index-startIndex-1],
+		})
+	}
+
+	if len(failedEdits) > 0 {
+		slices.SortStableFunc(failedEdits, func(a, b FailedEdit) int { return a.Index - b.Index })
+		return content, failedEdits, false
+	}
+
+	// Replace from the end of the file backward so earlier offsets stay
+	// valid.
+	result := content
+	for _, s := range slices.Backward(spans) {
+		result = result[:s.start] + s.replacement + result[s.end:]
+	}
+	return result, nil, whitespaceCorrected
+}
+
+// locateEdit finds the ranges of content that edit replaces, using the same
+// exact-then-whitespace-normalized matching as the edit tool. The returned
+// boolean reports whether the match relied on whitespace normalization.
+func locateEdit(content string, edit MultiEditOperation, index int) ([]editSpan, bool, error) {
+	old := edit.OldString
+	if old == "" {
+		return nil, false, errors.New("old_string cannot be empty for content replacement")
+	}
+	if old == edit.NewString {
+		return nil, false, errors.New("old_string and new_string are identical, so this edit would change nothing")
+	}
+
+	var exact []editSpan
+	for from := 0; ; {
+		i := strings.Index(content[from:], old)
+		if i == -1 {
+			break
+		}
+		start := from + i
+		exact = append(exact, editSpan{start: start, end: start + len(old), replacement: edit.NewString, index: index})
+		from = start + len(old)
+	}
+	if len(exact) > 0 {
+		if len(exact) > 1 && !edit.ReplaceAll {
+			return nil, false, ambiguousError(len(exact))
+		}
+		return exact, false, nil
+	}
+
+	matches := findNormalizedMatches(content, old)
+	if len(matches) == 0 {
+		return nil, false, notFoundError(content, old)
+	}
+	if len(matches) > 1 && !edit.ReplaceAll {
+		return nil, false, ambiguousError(len(matches))
+	}
+
+	lines := strings.Split(content, "\n")
+	lineStarts := make([]int, len(lines))
+	offset := 0
+	for i, l := range lines {
+		lineStarts[i] = offset
+		offset += len(l) + 1
+	}
+	fileUnit := detectIndentUnit(lines)
+	spans := make([]editSpan, 0, len(matches))
+	for _, m := range matches {
+		start := lineStarts[m.startLine]
+		end := lineStarts[m.endLine] + len(lines[m.endLine])
+		spans = append(spans, editSpan{
+			start:       start,
+			end:         end,
+			replacement: adaptIndentation(content[start:end], old, edit.NewString, fileUnit),
+			index:       index,
+		})
+	}
+	return spans, true, nil
+}
+
+func ambiguousError(n int) error {
+	return fmt.Errorf("old_string appears multiple times in the file (%d matches). Please provide more context to ensure a unique match, or set replace_all to true", n)
+}
+
+// failedEditsMessage describes every failed edit so the caller can fix them
+// all in one retry.
+func failedEditsMessage(failedEdits []FailedEdit, total int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "no changes made: %d of %d edit(s) failed. Edits are matched against the original file and applied all-or-nothing, so fix the failed edits and resend the whole batch.", len(failedEdits), total)
+	for _, f := range failedEdits {
+		fmt.Fprintf(&b, "\n\nedit %d: %s", f.Index, f.Error)
+	}
+	return b.String()
 }
 
 func processMultiEditWithCreation(edit editContext, params MultiEditParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
@@ -165,13 +284,16 @@ func processMultiEditWithCreation(edit editContext, params MultiEditParams, call
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to access file: %w", err)
 	}
 
+	currentContent, failedEdits, whitespaceCorrected := applyEditsToContent(firstEdit.NewString, params.Edits[1:], 1)
+	if len(failedEdits) > 0 {
+		return failedEditsResponse(failedEdits, len(params.Edits)), nil
+	}
+
 	// Create parent directories
 	dir := filepath.Dir(params.FilePath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to create parent directories: %w", err)
 	}
-
-	currentContent, failedEdits, whitespaceCorrected := applyEditsToContent(firstEdit.NewString, params.Edits[1:], 1)
 
 	// Get session and message IDs
 	sessionID := GetSessionFromContext(edit.ctx)
@@ -182,20 +304,14 @@ func processMultiEditWithCreation(edit editContext, params MultiEditParams, call
 	// Check permissions
 	_, additions, removals := diff.GenerateDiff("", currentContent, strings.TrimPrefix(params.FilePath, edit.workingDir))
 
-	editsApplied := len(params.Edits) - len(failedEdits)
-	var description string
-	if len(failedEdits) > 0 {
-		description = fmt.Sprintf("Create file %s with %d of %d edits (%d failed)", params.FilePath, editsApplied, len(params.Edits), len(failedEdits))
-	} else {
-		description = fmt.Sprintf("Create file %s with %d edits", params.FilePath, editsApplied)
-	}
+	editsApplied := len(params.Edits)
 	p, err := edit.permissions.Request(edit.ctx, permission.CreatePermissionRequest{
 		SessionID:   sessionID,
 		Path:        fsext.PathOrPrefix(params.FilePath, edit.workingDir),
 		ToolCallID:  call.ID,
 		ToolName:    MultiEditToolName,
 		Action:      "write",
-		Description: description,
+		Description: fmt.Sprintf("Create file %s with %d edits", params.FilePath, editsApplied),
 		Params: MultiEditPermissionsParams{
 			FilePath:   params.FilePath,
 			OldContent: "",
@@ -213,9 +329,17 @@ func processMultiEditWithCreation(edit editContext, params MultiEditParams, call
 			Additions:    additions,
 			Removals:     removals,
 			EditsApplied: editsApplied,
-			EditsFailed:  failedEdits,
 		})
 		return resp, nil
+	}
+
+	unlock := lockFile(params.FilePath)
+	defer unlock()
+
+	// Another call may have created the file while this one waited for
+	// permission.
+	if _, err := os.Stat(params.FilePath); err == nil {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("file already exists: %s", params.FilePath)), nil
 	}
 
 	// Write the file
@@ -237,12 +361,7 @@ func processMultiEditWithCreation(edit editContext, params MultiEditParams, call
 
 	edit.filetracker.RecordRead(edit.ctx, sessionID, params.FilePath)
 
-	var message string
-	if len(failedEdits) > 0 {
-		message = fmt.Sprintf("File created with %d of %d edits: %s (%d edit(s) failed)", editsApplied, len(params.Edits), params.FilePath, len(failedEdits))
-	} else {
-		message = fmt.Sprintf("File created with %d edits: %s", len(params.Edits), params.FilePath)
-	}
+	message := fmt.Sprintf("File created with %d edits: %s", len(params.Edits), params.FilePath)
 	message = withWhitespaceNote(message, whitespaceCorrected)
 
 	return fantasy.WithResponseMetadata(
@@ -253,13 +372,12 @@ func processMultiEditWithCreation(edit editContext, params MultiEditParams, call
 			Additions:    additions,
 			Removals:     removals,
 			EditsApplied: editsApplied,
-			EditsFailed:  failedEdits,
 		},
 	), nil
 }
 
 func processMultiEditExistingFile(edit editContext, params MultiEditParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	sessionID, oldContent, isCrlf, resp, err := loadExistingFile(edit, params.FilePath, "session ID is required for editing a file")
+	sessionID, oldContent, _, resp, err := loadExistingFile(edit, params.FilePath, "session ID is required for editing a file")
 	if err != nil {
 		return fantasy.ToolResponse{}, err
 	}
@@ -268,39 +386,24 @@ func processMultiEditExistingFile(edit editContext, params MultiEditParams, call
 	}
 
 	currentContent, failedEdits, whitespaceCorrected := applyEditsToContent(oldContent, params.Edits, 0)
-
-	// Check if content actually changed
+	if len(failedEdits) > 0 {
+		return failedEditsResponse(failedEdits, len(params.Edits)), nil
+	}
 	if oldContent == currentContent {
-		// If we have failed edits, report them
-		if len(failedEdits) > 0 {
-			return fantasy.WithResponseMetadata(
-				fantasy.NewTextErrorResponse(fmt.Sprintf("no changes made - all %d edit(s) failed", len(failedEdits))),
-				MultiEditResponseMetadata{
-					EditsApplied: 0,
-					EditsFailed:  failedEdits,
-				},
-			), nil
-		}
 		return fantasy.NewTextErrorResponse("no changes made - all edits resulted in identical content"), nil
 	}
 
 	// Generate diff and check permissions
 	_, additions, removals := diff.GenerateDiff(oldContent, currentContent, strings.TrimPrefix(params.FilePath, edit.workingDir))
 
-	editsApplied := len(params.Edits) - len(failedEdits)
-	var description string
-	if len(failedEdits) > 0 {
-		description = fmt.Sprintf("Apply %d of %d edits to file %s (%d failed)", editsApplied, len(params.Edits), params.FilePath, len(failedEdits))
-	} else {
-		description = fmt.Sprintf("Apply %d edits to file %s", editsApplied, params.FilePath)
-	}
+	editsApplied := len(params.Edits)
 	p, err := edit.permissions.Request(edit.ctx, permission.CreatePermissionRequest{
 		SessionID:   sessionID,
 		Path:        fsext.PathOrPrefix(params.FilePath, edit.workingDir),
 		ToolCallID:  call.ID,
 		ToolName:    MultiEditToolName,
 		Action:      "write",
-		Description: description,
+		Description: fmt.Sprintf("Apply %d edits to file %s", editsApplied, params.FilePath),
 		Params: MultiEditPermissionsParams{
 			FilePath:   params.FilePath,
 			OldContent: oldContent,
@@ -318,26 +421,29 @@ func processMultiEditExistingFile(edit editContext, params MultiEditParams, call
 			Additions:    additions,
 			Removals:     removals,
 			EditsApplied: editsApplied,
-			EditsFailed:  failedEdits,
 		})
 		return resp, nil
 	}
 
-	writeContent := currentContent
-	if isCrlf {
-		writeContent, _ = fsext.ToWindowsLineEndings(writeContent)
+	approvedOld := oldContent
+	oldContent, _, resp, err = commitLocked(edit, params.FilePath, approvedOld, currentContent, func(current string) (string, error) {
+		result, failed, _ := applyEditsToContent(current, params.Edits, 0)
+		if len(failed) > 0 {
+			return "", errors.New(failedEditsMessage(failed, len(params.Edits)))
+		}
+		return result, nil
+	})
+	if err != nil || resp.IsError {
+		return resp, err
+	}
+	if oldContent != approvedOld {
+		// The file changed after approval and the edits were re-applied, so
+		// the diff stats and whitespace note must describe what was written.
+		currentContent, _, whitespaceCorrected = applyEditsToContent(oldContent, params.Edits, 0)
+		_, additions, removals = diff.GenerateDiff(oldContent, currentContent, strings.TrimPrefix(params.FilePath, edit.workingDir))
 	}
 
-	if err := commitFileChange(edit, sessionID, params.FilePath, oldContent, writeContent); err != nil {
-		return fantasy.ToolResponse{}, err
-	}
-
-	var message string
-	if len(failedEdits) > 0 {
-		message = fmt.Sprintf("Applied %d of %d edits to file: %s (%d edit(s) failed)", editsApplied, len(params.Edits), params.FilePath, len(failedEdits))
-	} else {
-		message = fmt.Sprintf("Applied %d edits to file: %s", len(params.Edits), params.FilePath)
-	}
+	message := fmt.Sprintf("Applied %d edits to file: %s", len(params.Edits), params.FilePath)
 	message = withWhitespaceNote(message, whitespaceCorrected)
 
 	return fantasy.WithResponseMetadata(
@@ -348,21 +454,15 @@ func processMultiEditExistingFile(edit editContext, params MultiEditParams, call
 			Additions:    additions,
 			Removals:     removals,
 			EditsApplied: editsApplied,
-			EditsFailed:  failedEdits,
 		},
 	), nil
 }
 
-// applyEditToContent applies a single edit, reporting whether it only matched
-// after whitespace normalization.
-func applyEditToContent(content string, edit MultiEditOperation) (string, bool, error) {
-	if edit.OldString == "" && edit.NewString == "" {
-		return content, false, nil
-	}
-
-	if edit.OldString == "" {
-		return "", false, fmt.Errorf("old_string cannot be empty for content replacement")
-	}
-
-	return findAndReplace(content, edit.OldString, edit.NewString, edit.ReplaceAll)
+// failedEditsResponse is the error returned when any edit fails; nothing is
+// written.
+func failedEditsResponse(failedEdits []FailedEdit, total int) fantasy.ToolResponse {
+	return fantasy.WithResponseMetadata(
+		fantasy.NewTextErrorResponse(failedEditsMessage(failedEdits, total)),
+		MultiEditResponseMetadata{EditsFailed: failedEdits},
+	)
 }

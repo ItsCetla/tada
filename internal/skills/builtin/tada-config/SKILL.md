@@ -1,6 +1,6 @@
 ---
 name: tada-config
-description: Use when the user needs help configuring Ta-Da — writing tadarc (the Bash config format) or tada.json, setting up providers, models, LSPs, MCP servers, hooks, skills, permissions, or changing Ta-Da behavior.
+description: Use to configure Ta-Da (tadarc or tada.json) providers, models, LSPs, MCP servers, hooks, skills, permissions.
 ---
 
 # Ta-Da Configuration
@@ -171,6 +171,10 @@ permissions deny <tool> [<tool> ...]    # hide tools from the agent entirely
 `deny` is the inverse of `allow`: it writes `options.disabled_tools`. A denied
 tool is hidden from the agent, not merely prompted for.
 
+`artifact`, `artifact_data`, `artifact_comments` and `machines` are off by
+default; list them in `options.enabled_tools` to turn them on (`machines` is
+also on whenever `machines` are configured).
+
 `allow-in-project` (`permissions.project_allowed_tools` in tada.json) is
 narrower than `allow`: the listed file tools (`edit`, `multiedit`, `write`, `lsp_replace_symbol`)
 skip the prompt only for files inside the project, and still ask for paths
@@ -193,6 +197,25 @@ option reset <list-key>    # clear a list option back to empty
   disables automatic summarization. `provider-auto-update` and `metrics` are
   still accepted but deprecated and have no effect: the provider catalog only
   changes through `tada update-providers`, and this fork has no telemetry.
+- **Claude Code engine**: `option claude-code-strict-mcp true` runs the
+  `claude` CLI with `--strict-mcp-config`, so it loads only Ta-Da's own MCP
+  servers and skips the ones in the user's Claude Code settings (faster
+  turns, fewer tool tokens; claude.ai connectors and global MCP servers are
+  then unavailable). Default `false`.
+- **Tool profile**: `option tool-profile lean` (`options.tool_profile`,
+  `full` or `lean`, default `full`) keeps only the core built-in tools
+  (`agent`, `bash`, `edit`, `multiedit`, `view`, `write`, `grep`, `glob`,
+  `ls`, `question`). Add tools back one per line with `option enable-tool`
+  (appends to `options.enabled_tools`), e.g. `option enable-tool lsp_rename`
+  and `option enable-tool lsp_replace_symbol`. Lean also hides MCP server
+  tools; bring a whole server back with `option enable-tool mcp_<server>` or
+  one tool with its full name (`mcp_<server>_<tool>`).
+- **Compaction**: `option compaction-reserve-tokens N`
+  (`options.compaction_reserve_tokens`, default 16384) is the free context
+  kept before the conversation is summarized; `option
+  compaction-keep-recent-tokens N` (`options.compaction_keep_recent_tokens`,
+  default 20000) is how much of the newest conversation a summary keeps word
+  for word. Both are capped by the model's window (half and a quarter).
 - **String keys**: `data-directory`, `initialize-as`, `notifications`,
   `worktree-dir`.
 - **Attribution keys**: `attribution-trailer-style` (`none`, `co-authored-by`,
@@ -220,7 +243,8 @@ option ui exit-banner compact
 
 > [!IMPORTANT] These skill paths are loaded by default and do NOT need
 > `skill-path`: `.agents/skills`, `.tada/skills`, `.claude/skills`,
-> `.cursor/skills`.
+> `.cursor/skills`. Claude Code's user skills (`~/.claude/skills`) are not
+> loaded by default; opt in with `option skill-path ~/.claude/skills`.
 
 ## Hooks runtime
 

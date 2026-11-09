@@ -26,8 +26,8 @@ import (
 var writeDescription string
 
 type WriteParams struct {
-	FilePath string `json:"file_path" description:"The path to the file to write"`
-	Content  string `json:"content" description:"The content to write to the file"`
+	FilePath string `json:"file_path" description:"File path"`
+	Content  string `json:"content" description:"Full file content"`
 }
 
 type WritePermissionsParams struct {
@@ -140,6 +140,23 @@ func NewWriteTool(
 				return resp, nil
 			}
 
+			unlock := lockFile(filePath)
+			defer unlock()
+
+			// Re-check under the lock: the file may have changed while this
+			// call waited for permission.
+			if info, statErr := os.Stat(filePath); statErr == nil && !info.IsDir() {
+				modTime := info.ModTime().Truncate(time.Second)
+				lastRead := filetracker.LastReadTime(ctx, sessionID, filePath)
+				if modTime.After(lastRead) {
+					return fantasy.NewTextErrorResponse(fmt.Sprintf("File %s has been modified since it was last read.\nLast modification: %s\nLast read: %s\n\nPlease read the file again before modifying it.",
+						filePath, modTime.Format(time.RFC3339), lastRead.Format(time.RFC3339))), nil
+				}
+				if oldBytes, readErr := os.ReadFile(filePath); readErr == nil {
+					oldContent = string(oldBytes)
+				}
+			}
+
 			err = os.WriteFile(filePath, []byte(params.Content), 0o644)
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("error writing file: %w", err)
@@ -172,6 +189,7 @@ func NewWriteTool(
 			}
 
 			filetracker.RecordRead(ctx, sessionID, filePath)
+			unlock()
 
 			notifyLSPs(ctx, lspManager, params.FilePath)
 

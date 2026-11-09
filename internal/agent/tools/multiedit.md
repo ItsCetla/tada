@@ -1,1 +1,1 @@
-Apply multiple find-and-replace edits to a single file in one operation; edits run sequentially. Prefer over edit for multiple changes to the same file. Same exact-match rules as edit apply.
+Several find-and-replace edits to one file. Each old_string is matched against the original file, so order doesn't matter; edits must cover disjoint regions (merge overlaps). All-or-nothing: on any failure nothing is applied and every failure is reported; fix and resend all. The edit tool's rules apply to each entry.

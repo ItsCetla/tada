@@ -1,1 +1,6 @@
-Edit a file by exact find-and-replace; can also create or delete content. If old_string differs from the file only in whitespace, the matching lines are still edited and new_string is re-indented to the file's style; the response says when this happened, so verify the result. For whole-function/method/type replacements prefer `lsp_replace_symbol` (no whitespace matching needed). For renames prefer `lsp_rename` (semantic, cross-file). For large edits use write.
+Exact find-and-replace in a file.
+- View it first; copy old_string exactly (whitespace, blank lines), with 3-5 lines of context so it matches once.
+- An indentation-only mismatch is still applied and re-indented; the response says so, check it.
+- On "not found", view again and copy the exact text; never guess.
+- Don't re-read after success.
+- Several changes to one file: multiedit. Rewrites: write. Prefer `lsp_replace_symbol`/`lsp_rename` when available.

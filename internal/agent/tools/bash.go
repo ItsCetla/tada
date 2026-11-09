@@ -27,11 +27,11 @@ import (
 )
 
 type BashParams struct {
-	Description         string `json:"description" description:"A brief description of what the command does, try to keep it under 30 characters or so"`
-	Command             string `json:"command" description:"The command to execute"`
-	WorkingDir          string `json:"working_dir,omitempty" description:"The working directory to execute the command in (defaults to current directory)"`
-	RunInBackground     bool   `json:"run_in_background,omitempty" description:"Set to true (boolean) to run this command in the background. Use job_output to read the output later."`
-	AutoBackgroundAfter int    `json:"auto_background_after,omitempty" description:"Seconds to wait before automatically moving the command to a background job (default: 60)"`
+	Description         string `json:"description" description:"What the command does, in a few words"`
+	Command             string `json:"command" description:"Command to run"`
+	WorkingDir          string `json:"working_dir,omitempty" description:"Working directory (default: current)"`
+	RunInBackground     bool   `json:"run_in_background,omitempty" description:"Run as a background job"`
+	AutoBackgroundAfter int    `json:"auto_background_after,omitempty" description:"Seconds before moving to the background (default 60)"`
 }
 
 type BashPermissionsParams struct {
@@ -79,12 +79,13 @@ var bashDescriptionTpl = template.Must(
 )
 
 type bashDescriptionData struct {
-	BannedCommands  string
-	MaxOutputLength int
-	Attribution     config.Attribution
-	ModelID         string
-	RgAvailable     bool
-	GhAvailable     bool
+	BannedCommands             string
+	MaxOutputLength            int
+	DefaultAutoBackgroundAfter int
+	Attribution                config.Attribution
+	ModelID                    string
+	RgAvailable                bool
+	GhAvailable                bool
 }
 
 var bannedCommands = []string{
@@ -164,12 +165,13 @@ func bashDescription(attribution *config.Attribution, modelID string) string {
 	bannedCommandsStr := strings.Join(bannedCommands, ", ")
 	var out bytes.Buffer
 	if err := bashDescriptionTpl.Execute(&out, bashDescriptionData{
-		BannedCommands:  bannedCommandsStr,
-		MaxOutputLength: MaxOutputLength,
-		Attribution:     *attribution,
-		ModelID:         modelID,
-		RgAvailable:     getRg() != "",
-		GhAvailable:     ghAvailable,
+		BannedCommands:             bannedCommandsStr,
+		MaxOutputLength:            MaxOutputLength,
+		DefaultAutoBackgroundAfter: DefaultAutoBackgroundAfter,
+		Attribution:                *attribution,
+		ModelID:                    modelID,
+		RgAvailable:                getRg() != "",
+		GhAvailable:                ghAvailable,
 	}); err != nil {
 		// this should never happen.
 		panic("failed to execute bash description template: " + err.Error())
@@ -492,14 +494,22 @@ func TruncateOutput(content, spillDir string) string {
 	start := ansi.Truncate(content, halfLength, "")
 	end := ansi.TruncateLeft(content, ansi.StringWidth(content)-halfLength, "")
 
-	truncatedLinesCount := max(strings.Count(content, "\n")-strings.Count(start, "\n")-strings.Count(end, "\n"), 0)
-	marker := fmt.Sprintf("... [%d lines truncated] ...", truncatedLinesCount)
-	if path, err := shell.SpillOutput(ansi.Strip(content), spillDir); err == nil {
-		marker = fmt.Sprintf("... [%d lines truncated, full output: %s] ...", truncatedLinesCount, path)
-	} else {
+	totalLines := strings.Count(content, "\n") + 1
+	path, err := shell.SpillOutput(ansi.Strip(content), spillDir)
+	if err != nil {
 		slog.Debug("Could not spill tool output", "dir", spillDir, "error", err)
+		path = ""
 	}
-	return fmt.Sprintf("%s\n\n%s\n\n%s", start, marker, end)
+	return fmt.Sprintf("%s\n\n%s\n\n%s", start, bashTruncationNotice(halfLength, totalLines, path), end)
+}
+
+// bashTruncationNotice states what TruncateOutput kept and how to get the
+// rest. An empty path means the full output could not be saved.
+func bashTruncationNotice(half, totalLines int, path string) string {
+	if path == "" {
+		return fmt.Sprintf("[Showing first and last %d chars of %d lines. The middle could not be saved; narrow the command's output with grep or a line range if you need it.]", half, totalLines)
+	}
+	return fmt.Sprintf("[Showing first and last %d chars of %d lines. Full output: %s. Use the grep or view tool on it; don't rerun the command.]", half, totalLines, path)
 }
 
 func truncateOutput(content, spillDir string) string {

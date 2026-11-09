@@ -19,9 +19,9 @@ import (
 )
 
 type LSParams struct {
-	Path   string   `json:"path,omitempty" description:"The path to the directory to list (defaults to current working directory)"`
-	Ignore []string `json:"ignore,omitempty" description:"List of glob patterns to ignore"`
-	Depth  int      `json:"depth,omitempty" description:"The maximum depth to traverse"`
+	Path   string   `json:"path,omitempty" description:"Directory (default: cwd)"`
+	Ignore []string `json:"ignore,omitempty" description:"Glob patterns to skip"`
+	Depth  int      `json:"depth,omitempty" description:"Max depth"`
 }
 
 type LSPermissionsParams struct {
@@ -73,7 +73,7 @@ func lsDescription() string {
 }
 
 func NewLsTool(permissions permission.Service, workingDir string, lsConfig config.ToolLs) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
+	return fantasy.NewParallelAgentTool(
 		LSToolName,
 		lsDescription(),
 		func(ctx context.Context, params LSParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
@@ -144,14 +144,20 @@ func ListDirectoryTree(searchPath string, params LSParams, lsConfig config.ToolL
 
 	depth, limit := lsConfig.Limits()
 	maxFiles := cmp.Or(limit, maxLSFiles)
-	files, truncated, err := fsext.ListDirectory(
+	// Ask for one extra entry: fastwalk swallows SkipAll, so the walk's
+	// own truncated flag misses a listing that stopped exactly at the cap.
+	files, _, err := fsext.ListDirectory(
 		searchPath,
 		params.Ignore,
 		cmp.Or(params.Depth, depth),
-		maxFiles,
+		maxFiles+1,
 	)
 	if err != nil {
 		return "", LSResponseMetadata{}, fmt.Errorf("error listing directory: %w", err)
+	}
+	truncated := len(files) > maxFiles
+	if truncated {
+		files = files[:maxFiles]
 	}
 
 	metadata := LSResponseMetadata{
@@ -161,13 +167,20 @@ func ListDirectoryTree(searchPath string, params LSParams, lsConfig config.ToolL
 	tree := createFileTree(files, searchPath)
 
 	var output string
-	if truncated {
-		output = fmt.Sprintf("There are more than %d files in the directory. Use a more specific path or use the Glob tool to find specific files. The first %[1]d files and directories are included below.\n", maxFiles)
-	}
 	if depth > 0 {
 		output = fmt.Sprintf("The directory tree is shown up to a depth of %d. Use a higher depth and a specific path to see more levels.\n", cmp.Or(params.Depth, depth))
 	}
-	return output + "\n" + printTree(tree, searchPath), metadata, nil
+	output += "\n" + printTree(tree, searchPath)
+	if truncated {
+		output += "\n" + lsTruncationNotice(maxFiles)
+	}
+	return output, metadata, nil
+}
+
+// lsTruncationNotice states the cap and how to reach the rest. The walk
+// stops at the cap, so the total number of entries is not known.
+func lsTruncationNotice(shown int) string {
+	return fmt.Sprintf("[Showing first %d entries; more exist. List a subdirectory, add ignore patterns, or use glob to see the rest.]", shown)
 }
 
 func createFileTree(sortedPaths []string, rootPath string) []*TreeNode {

@@ -24,10 +24,10 @@ import (
 )
 
 type EditParams struct {
-	FilePath   string `json:"file_path" description:"The absolute path to the file to modify"`
-	OldString  string `json:"old_string" description:"The text to replace"`
-	NewString  string `json:"new_string" description:"The text to replace it with"`
-	ReplaceAll bool   `json:"replace_all,omitempty" description:"Replace all occurrences of old_string (default false)"`
+	FilePath   string `json:"file_path" description:"Absolute file path"`
+	OldString  string `json:"old_string" description:"Exact text to replace"`
+	NewString  string `json:"new_string" description:"Replacement text"`
+	ReplaceAll bool   `json:"replace_all,omitempty" description:"Replace every match"`
 }
 
 type EditPermissionsParams struct {
@@ -166,6 +166,15 @@ func createNewFile(edit editContext, filePath, content string, call fantasy.Tool
 		return resp, nil
 	}
 
+	unlock := lockFile(filePath)
+	defer unlock()
+
+	// Another call may have created the file while this one waited for
+	// permission.
+	if _, err := os.Stat(filePath); err == nil {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("file already exists: %s", filePath)), nil
+	}
+
 	err = os.WriteFile(filePath, []byte(content), 0o644)
 	if err != nil {
 		return fantasy.ToolResponse{}, fmt.Errorf("failed to write file: %w", err)
@@ -275,7 +284,55 @@ func commitFileChange(edit editContext, sessionID, filePath, oldContent, newCont
 	return nil
 }
 
+// commitLocked takes the file's write lock, re-reads the file with the same
+// read-before-edit and modification checks as loadExistingFile, and commits
+// the change. When the file changed after approvedOld was read, for example
+// because a parallel edit to the same file landed while this one waited for
+// permission, apply is re-run on the current content so neither change is
+// lost. It returns the content that was replaced and the content written,
+// with the file's original line endings.
+func commitLocked(edit editContext, filePath, approvedOld, approvedNew string, apply func(current string) (string, error)) (oldContent, writeContent string, resp fantasy.ToolResponse, err error) {
+	unlock := lockFile(filePath)
+	defer unlock()
+
+	sessionID, current, isCrlf, resp, err := loadExistingFileLocked(edit, filePath, "session ID is required for editing a file")
+	if err != nil {
+		return "", "", fantasy.ToolResponse{}, err
+	}
+	if resp.Content != "" || resp.IsError {
+		return "", "", resp, nil
+	}
+
+	newContent := approvedNew
+	if current != approvedOld {
+		newContent, err = apply(current)
+		if err != nil {
+			return "", "", fantasy.NewTextErrorResponse("the file changed before this edit was written and the edit no longer applies: " + err.Error()), nil
+		}
+	}
+
+	writeContent = newContent
+	if isCrlf {
+		writeContent, _ = fsext.ToWindowsLineEndings(writeContent)
+	}
+	if err := commitFileChange(edit, sessionID, filePath, current, writeContent); err != nil {
+		return "", "", fantasy.ToolResponse{}, err
+	}
+	return current, writeContent, fantasy.ToolResponse{}, nil
+}
+
+// loadExistingFile reads a file for editing under its write lock, so it never
+// sees a half-written file from a parallel edit.
 func loadExistingFile(edit editContext, filePath, sessionError string) (sessionID, oldContent string, isCrlf bool, resp fantasy.ToolResponse, err error) {
+	unlock := lockFile(filePath)
+	defer unlock()
+	return loadExistingFileLocked(edit, filePath, sessionError)
+}
+
+// loadExistingFileLocked checks that the file was read and not modified
+// since, then returns its content with Unix line endings. The caller must
+// hold the file's write lock.
+func loadExistingFileLocked(edit editContext, filePath, sessionError string) (sessionID, oldContent string, isCrlf bool, resp fantasy.ToolResponse, err error) {
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -318,7 +375,7 @@ func loadExistingFile(edit editContext, filePath, sessionError string) (sessionI
 }
 
 func deleteContent(edit editContext, filePath, oldString string, replaceAll bool, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	sessionID, oldContent, isCrlf, resp, err := loadExistingFile(edit, filePath, "session ID is required for deleting content")
+	sessionID, oldContent, _, resp, err := loadExistingFile(edit, filePath, "session ID is required for deleting content")
 	if err != nil {
 		return fantasy.ToolResponse{}, err
 	}
@@ -367,13 +424,12 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 		return resp, nil
 	}
 
-	writeContent := newContent
-	if isCrlf {
-		writeContent, _ = fsext.ToWindowsLineEndings(writeContent)
-	}
-
-	if err := commitFileChange(edit, sessionID, filePath, oldContent, writeContent); err != nil {
-		return fantasy.ToolResponse{}, err
+	oldContent, writeContent, resp, err := commitLocked(edit, filePath, oldContent, newContent, func(current string) (string, error) {
+		result, _, err := findAndReplace(current, oldString, "", replaceAll)
+		return result, err
+	})
+	if err != nil || resp.IsError {
+		return resp, err
 	}
 
 	return fantasy.WithResponseMetadata(
@@ -388,7 +444,7 @@ func deleteContent(edit editContext, filePath, oldString string, replaceAll bool
 }
 
 func replaceContent(edit editContext, filePath, oldString, newString string, replaceAll bool, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-	sessionID, oldContent, isCrlf, resp, err := loadExistingFile(edit, filePath, "session ID is required for editing a file")
+	sessionID, oldContent, _, resp, err := loadExistingFile(edit, filePath, "session ID is required for editing a file")
 	if err != nil {
 		return fantasy.ToolResponse{}, err
 	}
@@ -440,13 +496,12 @@ func replaceContent(edit editContext, filePath, oldString, newString string, rep
 		return resp, nil
 	}
 
-	writeContent := result
-	if isCrlf {
-		writeContent, _ = fsext.ToWindowsLineEndings(writeContent)
-	}
-
-	if err := commitFileChange(edit, sessionID, filePath, oldContent, writeContent); err != nil {
-		return fantasy.ToolResponse{}, err
+	oldContent, writeContent, resp, err := commitLocked(edit, filePath, oldContent, result, func(current string) (string, error) {
+		result, _, err := findAndReplace(current, oldString, newString, replaceAll)
+		return result, err
+	})
+	if err != nil || resp.IsError {
+		return resp, err
 	}
 
 	return fantasy.WithResponseMetadata(
