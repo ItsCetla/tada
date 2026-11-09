@@ -174,8 +174,12 @@ func (a *sessionAgent) runClaudeCode(
 
 	run := func(resume bool) (*claudecode.TurnResult, error) {
 		opts.Resume = resume
-		opts.Prompt = ccTranscript(history, model.ModelCfg.Provider, resume) + prompt
-		return claudecode.RunTurn(genCtx, opts, handler)
+		// A live process already holds the conversation up to its last
+		// turn, so it only needs the turns other models handled since,
+		// the same as a resumed session.
+		live := claudecode.DefaultPool.Live(opts)
+		opts.Prompt = ccTranscript(history, model.ModelCfg.Provider, resume || live) + prompt
+		return claudecode.DefaultPool.RunTurn(genCtx, opts, handler)
 	}
 	// The CLI does its own networking, out of Ta-Da's sight; note the turn
 	// so the privacy receipt still says a model host was reached.

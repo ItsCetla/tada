@@ -1,7 +1,6 @@
 package claudecode
 
 import (
-	"bufio"
 	"cmp"
 	"context"
 	"encoding/base64"
@@ -9,14 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/crush/internal/proc"
 	"github.com/google/uuid"
 )
 
@@ -271,84 +267,75 @@ func routesAwayFromLogin(name string) bool {
 
 // RunTurn starts the CLI, sends one prompt, streams events to h until the
 // final result, and waits for the process to exit. Cancelling ctx sends an
-// interrupt and then kills the process if it does not stop.
+// interrupt and then kills the process if it does not stop. Pool.RunTurn
+// keeps the process for the next turn instead.
 func RunTurn(ctx context.Context, opts TurnOptions, h Handler) (*TurnResult, error) {
-	bin := opts.Binary
-	if bin == "" {
-		bin = FindBinary()
-	}
-	if bin == "" {
-		return nil, errors.New("claude code: the `claude` CLI was not found on PATH")
-	}
-	// Not CommandContext: cancelling ctx must interrupt first, then kill (below).
-	cmd := exec.Command(bin, BuildArgs(opts)...) //nolint:noctx // cancellation handled by hand
-	cmd.Dir = opts.WorkDir
-	proc.HideConsole(cmd)
-	// Bounds Wait if a process the CLI started outlives it holding stderr.
-	cmd.WaitDelay = 5 * time.Second
-	cmd.Env = opts.Env
-	if cmd.Env == nil {
-		cmd.Env = ChildEnv(os.Environ(), false)
-	}
-	stdin, err := cmd.StdinPipe()
+	opts = normalize(opts)
+	p, err := startProc(opts)
 	if err != nil {
 		return nil, err
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
+	res, keep, err := p.runTurn(ctx, opts, h, true)
+	if keep {
+		// The turn ended cleanly with the CLI still up: let it exit.
+		p.close(exitGrace)
+		res.Stderr = p.stderr.String()
 	}
-	stderr := &cappedBuffer{max: 64 << 10}
-	cmd.Stderr = stderr
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("claude code: start %s: %w", bin, err)
-	}
+	return res, err
+}
 
+// errProcGone means a reused process was gone before it took the prompt.
+// The pool retries the turn on a fresh process.
+var errProcGone = errors.New("claude code: process exited before the turn started")
+
+// runTurn sends one prompt to p and streams its events to h until the
+// final result. first marks the process's first turn, which also sends
+// the initialize request. keep reports whether p is still fit for another
+// turn; when it is not, runTurn has already shut it down.
+func (p *cliProc) runTurn(ctx context.Context, opts TurnOptions, h Handler, first bool) (res *TurnResult, keep bool, err error) {
 	permCtx, cancelPerms := context.WithCancel(ctx)
 	defer cancelPerms()
 	t := &turn{
-		stdin:      stdin,
+		p:          p,
 		permCtx:    permCtx,
 		pending:    map[string]*pendingPerm{},
-		resultCh:   make(chan struct{}),
 		msgSession: opts.SessionID,
 		promptUUID: uuid.NewString(),
 		promptText: opts.Prompt,
 	}
 	defer t.stopWaiting()
 
-	// The whole tree: on Windows `claude` is often a .cmd shim, and killing
-	// only the shim leaves node holding stdout, so the read loop never ends.
-	kill := func() { _ = proc.KillTree(cmd.Process) }
-
-	t.initID = t.nextID()
-	if err := t.send(map[string]any{
-		"type":       "control_request",
-		"request_id": t.initID,
-		"request":    map[string]any{"subtype": "initialize"},
-	}); err == nil {
+	var sendErr error
+	if first {
+		t.initID = t.nextID()
+		sendErr = t.send(map[string]any{
+			"type":       "control_request",
+			"request_id": t.initID,
+			"request":    map[string]any{"subtype": "initialize"},
+		})
+	}
+	if sendErr == nil {
 		// A failed write means the CLI already exited; the read loop
 		// below picks up its output and stderr either way.
-		_ = t.send(userMessage(t.promptUUID, opts.SessionID, userContent(opts)))
+		sendErr = t.send(userMessage(t.promptUUID, opts.SessionID, userContent(opts)))
+	}
+	if !first && sendErr != nil {
+		p.close(0)
+		return nil, false, errProcGone
 	}
 	if h.OnStart != nil {
 		h.OnStart(t.steer)
 	}
 
 	readDone := make(chan error, 1)
-	go func() { readDone <- t.readLoop(stdout, h) }()
+	go func() { readDone <- t.readLoop(p.lines, h) }()
 
 	var readErr error
+	cancelled := false
 	select {
 	case readErr = <-readDone:
-	case <-t.resultCh:
-		select {
-		case readErr = <-readDone:
-		case <-time.After(exitGrace):
-			kill()
-			readErr = <-readDone
-		}
 	case <-ctx.Done():
+		cancelled = true
 		t.markStopping()
 		_ = t.send(map[string]any{
 			"type":       "control_request",
@@ -357,65 +344,75 @@ func RunTurn(ctx context.Context, opts TurnOptions, h Handler) (*TurnResult, err
 		})
 		select {
 		case readErr = <-readDone:
-		case <-t.resultCh:
-			if t.abandonedSteers() {
-				// Don't let the CLI start the steered messages it
-				// already read as a new turn.
-				kill()
-			}
-			select {
-			case readErr = <-readDone:
-			case <-time.After(interruptGrace):
-				kill()
-				readErr = <-readDone
-			}
 		case <-time.After(interruptGrace):
-			kill()
+			p.kill()
 			readErr = <-readDone
 		}
 	}
 	t.end()
-	if readErr != nil {
-		// The handler aborted (or stdout broke): make sure the child goes away.
-		kill()
+	if readErr != nil && !errors.Is(readErr, io.EOF) || t.abandonedSteers() {
+		// The handler aborted or stdout broke; or the CLI holds steered
+		// messages it would start as a new turn. Make sure it goes away.
+		p.kill()
 	}
 	// Withdraw any open permission prompts and wait for their handlers so
 	// none outlives the turn.
 	cancelPerms()
 	t.wg.Wait()
-	t.closeStdin()
-	waitErr := cmd.Wait()
 
-	res := &TurnResult{Result: t.result, SessionID: t.sessionID, Model: t.model, Stderr: stderr.String()}
+	keep = readErr == nil && t.result != nil && !cancelled && ctx.Err() == nil &&
+		!t.abandonedSteers() && !p.stdinClosed()
+	if keep && t.result.IsError && classify(t.result.Result+"\n"+strings.Join(t.result.Errors, "\n")) != nil {
+		keep = false
+	}
+	if !keep {
+		grace := exitGrace
+		if cancelled {
+			grace = interruptGrace
+		}
+		p.close(grace)
+	}
+	if !first && t.result == nil && !t.delivered && !cancelled && ctx.Err() == nil {
+		// The process died between turns: nothing reached h, so the
+		// turn can run again on a fresh one.
+		return nil, false, errProcGone
+	}
+
+	res = &TurnResult{
+		Result:    t.result,
+		SessionID: cmp.Or(t.sessionID, p.sessionID),
+		Model:     cmp.Or(t.model, p.model),
+		Stderr:    p.stderr.String(),
+	}
 	if readErr != nil && !errors.Is(readErr, io.EOF) {
-		return res, readErr
+		return res, false, readErr
 	}
 	if t.result != nil {
 		if err := classify(t.result.Result + "\n" + strings.Join(t.result.Errors, "\n")); err != nil && t.result.IsError && !t.sawAssistant {
-			return res, err
+			return res, false, err
 		}
 		if ctx.Err() != nil {
-			return res, ctx.Err()
+			return res, false, ctx.Err()
 		}
-		return res, nil
+		return res, keep, nil
 	}
 	if ctx.Err() != nil {
-		return res, ctx.Err()
+		return res, false, ctx.Err()
 	}
 	if err := classify(res.Stderr); err != nil {
-		return res, err
+		return res, false, err
 	}
 	msg := strings.TrimSpace(tail(res.Stderr, 2000))
-	if waitErr != nil {
+	if waitErr := p.waitErr; waitErr != nil {
 		if msg == "" {
-			return res, fmt.Errorf("claude code exited: %w", waitErr)
+			return res, false, fmt.Errorf("claude code exited: %w", waitErr)
 		}
-		return res, fmt.Errorf("claude code exited: %w: %s", waitErr, msg)
+		return res, false, fmt.Errorf("claude code exited: %w: %s", waitErr, msg)
 	}
 	if msg != "" {
-		return res, fmt.Errorf("claude code ended without a result: %s", msg)
+		return res, false, fmt.Errorf("claude code ended without a result: %s", msg)
 	}
-	return res, errors.New("claude code ended without a result")
+	return res, false, errors.New("claude code ended without a result")
 }
 
 func classify(text string) error {
@@ -434,23 +431,20 @@ type pendingPerm struct {
 }
 
 type turn struct {
-	writeMu sync.Mutex
-	stdin   io.WriteCloser
-	closed  bool
-	seq     int
+	p *cliProc
 
 	permCtx context.Context
 	wg      sync.WaitGroup
 	mu      sync.Mutex
 	pending map[string]*pendingPerm
 
-	resultOnce   sync.Once
-	resultCh     chan struct{}
 	result       *Event
 	sessionID    string
 	model        string
 	sawAssistant bool
 	initID       string
+	// delivered is set once anything of this turn reached the handler.
+	delivered bool
 
 	// Steering. steerMu orders steer writes against the decision to end
 	// the turn, so a message is either sent and waited for, or refused.
@@ -645,41 +639,16 @@ func (t *turn) initReply(ev Event) ([]ModelInfo, bool) {
 	return initModels(ev.Response)
 }
 
-func (t *turn) nextID() string {
-	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
-	t.seq++
-	return fmt.Sprintf("tada-%d", t.seq)
-}
+func (t *turn) nextID() string { return t.p.nextID() }
 
-func (t *turn) send(v any) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
-	if t.closed {
-		return io.ErrClosedPipe
-	}
-	_, err = t.stdin.Write(append(b, '\n'))
-	return err
-}
+func (t *turn) send(v any) error { return t.p.send(v) }
 
-func (t *turn) closeStdin() {
-	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
-	if !t.closed {
-		t.closed = true
-		_ = t.stdin.Close()
-	}
-}
+func (t *turn) closeStdin() { t.p.closeStdin() }
 
-func (t *turn) readLoop(r io.Reader, h Handler) error {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 1<<20), 256<<20)
-	for sc.Scan() {
-		line := sc.Bytes()
+// readLoop handles the process's output until this turn's final result,
+// or until stdout ends.
+func (t *turn) readLoop(lines <-chan []byte, h Handler) error {
+	for line := range lines {
 		if len(strings.TrimSpace(string(line))) == 0 {
 			continue
 		}
@@ -688,13 +657,14 @@ func (t *turn) readLoop(r io.Reader, h Handler) error {
 			// Not JSON (a stray log line); ignore it.
 			continue
 		}
-		ev.Raw = append(json.RawMessage(nil), line...)
+		ev.Raw = line
 		switch ev.Type {
 		case "keep_alive":
 			continue
 		case "control_response":
 			if h.OnModels != nil {
 				if models, ok := t.initReply(ev); ok {
+					t.delivered = true
 					h.OnModels(models)
 				}
 			}
@@ -704,6 +674,7 @@ func (t *turn) readLoop(r io.Reader, h Handler) error {
 				// Echoes of our own input. Only steered messages
 				// matter: the caller shows them where they landed.
 				if id, ok := t.matchSteer(ev); ok && h.OnSteer != nil {
+					t.delivered = true
 					if err := h.OnSteer(id); err != nil {
 						return err
 					}
@@ -714,12 +685,15 @@ func (t *turn) readLoop(r io.Reader, h Handler) error {
 			t.withdraw(ev.RequestID)
 			continue
 		case "control_request":
+			t.delivered = true
 			t.handleControl(ev, h)
 			continue
 		case "system":
 			if ev.Subtype == "init" {
 				t.sessionID = ev.SessionID
 				t.model = ev.Model
+				t.p.sessionID = ev.SessionID
+				t.p.model = ev.Model
 			}
 		case "assistant", "stream_event":
 			if !ev.IsSubagent() {
@@ -727,6 +701,7 @@ func (t *turn) readLoop(r io.Reader, h Handler) error {
 			}
 		}
 		if h.OnEvent != nil {
+			t.delivered = true
 			if err := h.OnEvent(ev); err != nil {
 				return err
 			}
@@ -739,15 +714,11 @@ func (t *turn) readLoop(r io.Reader, h Handler) error {
 				// the next turn, which ends with its own result.
 				continue
 			}
-			t.closeStdin()
-			t.resultOnce.Do(func() { close(t.resultCh) })
-			// Keep draining stdout until the process exits.
-			for sc.Scan() {
-			}
 			return nil
 		}
 	}
-	if err := sc.Err(); err != nil {
+	// The reader closes lines after setting readErr.
+	if err := t.p.readErr; err != nil {
 		return err
 	}
 	return io.EOF
