@@ -100,11 +100,35 @@
     <section class="section band" id="new" aria-labelledby="new-title">
       <div class="container">
         <div class="section-head">
-          <span class="eyebrow">New in 0.6.0</span>
-          <h2 id="new-title">Your machines work together. You stay in control.</h2>
-          <p>The biggest release yet. Everything is in the <a href="https://github.com/ItsCetla/tada/blob/main/CHANGELOG.md">changelog</a>.</p>
+          <span class="eyebrow">What's new</span>
+          <h2 id="new-title">Less prompt, more work. Your machines together. You stay in control.</h2>
+          <p>The first six cards are on <code>main</code> ahead of the next release; the rest shipped in 0.6.0. Everything is in the <a href="https://github.com/ItsCetla/tada/blob/main/CHANGELOG.md">changelog</a>.</p>
         </div>
         <div class="cards">
+          <article class="card">
+            <h3><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12h8M12 8v8"/></svg></span>A lean tool profile</h3>
+            <p>The model gets a small core of tools instead of everything at once. <code>option tool-profile lean</code> trims the built-ins and hides MCP tools; <code>option enable-tool &lt;name&gt;</code> adds a single tool or a whole MCP server back. Artifact tools are now opt-in with <code>option enable-tool artifact</code> (plus <code>artifact_data</code> and <code>artifact_comments</code>); <code>machines</code> stays on whenever you have machines configured.</p>
+          </article>
+          <article class="card">
+            <h3><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 12h10M4 17h7"/><circle cx="18" cy="16" r="3"/></svg></span>A smaller, stable prompt</h3>
+            <p>Tool descriptions and the coder prompt were condensed, and git status moved out of the system prompt into a hidden first-turn snapshot, so the prompt prefix stays byte-identical across turns and providers can cache it. OpenAI requests carry a <code>prompt_cache_key</code>. Long tool output shows its head and tail and saves the rest to a file the agent can grep. <code>~/.claude/skills</code> is no longer loaded by default; add <code>option skill-path ~/.claude/skills</code> to keep it.</p>
+          </article>
+          <article class="card">
+            <h3><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.2-8.6"/><path d="M21 3v6h-6"/><path d="M12 7v5l3 2"/></svg></span>Compaction on a budget</h3>
+            <p>When a session outgrows the context window, the summary is built to a token budget and dated back to the cut point so history still reads in order. A request that overflows the model's context is compacted and retried on its own instead of failing the turn.</p>
+          </article>
+          <article class="card">
+            <h3><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l2.4 5 5.6.8-4 3.9.9 5.6-4.9-2.6-4.9 2.6.9-5.6-4-3.9 5.6-.8z"/></svg></span>Skills per project</h3>
+            <p>Turn a skill on or off for one project from the command palette (<kbd>ctrl+p</kbd>). The choice is saved with the project, with a <code>.local</code> override for settings you want to keep out of git.</p>
+          </article>
+          <article class="card">
+            <h3><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4v5c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V7z"/><path d="M9 12l2 2 4-4"/></svg></span>A sandbox for shell commands (macOS)</h3>
+            <p><code>option sandbox workspace-write</code> or <code>read-only</code> runs the agent's shell commands under <code>sandbox-exec</code>, so they can only write to the project and temp folders and can't touch git hooks, git config or config files that run code. The network is cut off too unless you turn <code>option sandbox-network</code> on. Permission prompts still appear as usual. Off by default.</p>
+          </article>
+          <article class="card">
+            <h3><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M8 13l3 3 5-6"/></svg></span>Rewind covers shell commands too</h3>
+            <p>Ta-Da takes a hidden git snapshot before and after each foreground shell command and records the text files it changed, so rewinding a turn restores or deletes them like edits made with the file tools. Binary files, very large files and anything it couldn't record are named in the command's result instead.</p>
+          </article>
           <article class="card">
             <h3><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5" cy="6" r="2"/><circle cx="19" cy="6" r="2"/><circle cx="12" cy="19" r="2"/><path d="M5 8v2a3 3 0 0 0 3 3h8a3 3 0 0 0 3-3V8M12 13v4"/></svg></span>A swarm on your machines</h3>
             <p>Split a mission's open goals across every ready machine. Each one works in its own worktree and branch with its own model, and the <strong>Merge Board</strong> shows each card's status, checks, cost and diff so you merge (<kbd>m</kbd>) or discard (<kbd>d</kbd>) each branch. Ta-Da shows the plan and starts only when you confirm, every tool call still asks you, and a swarm won't start in auto mode.</p>
