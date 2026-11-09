@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/snapshot"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -132,6 +133,13 @@ func newRealCreateHarness(t *testing.T) *e2eHarness {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	// The App created by POST /v1/workspaces warms shell change
+	// recording in the background under the test's data directory,
+	// and the tests bypass the full app.Shutdown path that would wait
+	// for it. Register the wait after the first t.TempDir call above
+	// so it runs before the temp directories are removed.
+	t.Cleanup(snapshot.Idle)
 
 	h := &e2eHarness{}
 	h.installServer(t)
