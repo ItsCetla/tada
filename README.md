@@ -759,11 +759,13 @@ The global paths we looks for skills are:
 - `$XDG_CONFIG_HOME/agents/skills` or `~/.config/agents/skills/`
 - `$XDG_CONFIG_HOME/tada/skills` or `~/.config/tada/skills/`
 - `~/.agents/skills/`
-- `~/.claude/skills/`
 - On Windows, we _also_ look at
   - `%LOCALAPPDATA%\agents\skills\` or `%USERPROFILE%\AppData\Local\agents\skills\`
   - `%LOCALAPPDATA%\tada\skills\` or `%USERPROFILE%\AppData\Local\tada\skills\`
 - Additional paths configured via `options.skills_paths`
+
+Claude Code's user skills in `~/.claude/skills/` are not loaded by default.
+Opt in with `option skill-path ~/.claude/skills` in your `tadarc`.
 
 On top of that, we _also_ load skills in your project from the following
 relative paths:
@@ -977,6 +979,30 @@ cost is only shown with `use_api_key`. Set `"disable": true` on the provider
 to hide it. Session titles come from your first message, so nothing is sent
 to another provider to name a Claude Code session.
 
+Each turn the CLI also starts every MCP server in your Claude Code settings.
+`option claude-code-strict-mcp true` (`options.claude_code_strict_mcp`) runs
+it with `--strict-mcp-config`, so only Ta-Da's own MCP servers load: faster
+turns and fewer tool tokens, but your claude.ai connectors and global MCP
+servers aren't available inside Ta-Da.
+
+### Lean tool profile
+
+`option tool-profile lean` (`options.tool_profile`, default `full`) trims
+the built-in tools to a small core: `agent`, `bash`, `edit`, `multiedit`,
+`view`, `write`, `grep`, `glob`, `ls` and `question`. Fewer tool schemas
+means fewer tokens per turn. Add single tools back with `option enable-tool`
+(one tool per line, stored in `options.enabled_tools`):
+
+```bash
+option tool-profile lean
+option enable-tool lsp_rename
+option enable-tool lsp_replace_symbol
+```
+
+Lean also hides tools from MCP servers. Bring a whole server back with
+`option enable-tool mcp_<server>` (e.g. `mcp_playwright`), or one tool with
+its full name (e.g. `mcp_playwright_browser_click`).
+
 ### Artifacts
 
 The agent can publish a page instead of a wall of terminal text: a report,
@@ -989,7 +1015,9 @@ published.
 
 The agent gets three tools: `artifact` (publish, read, list, open and
 delete), `artifact_data` (the page's database) and `artifact_comments`.
-They're on by default. Open the gallery from the command palette with
+They're off by default since their schemas are large; turn them on with
+`option enable-tool artifact` (and `artifact_data`, `artifact_comments`)
+in your `tadarc`. Open the gallery from the command palette with
 **Open Artifacts Gallery**, or from a shell:
 
 ```bash

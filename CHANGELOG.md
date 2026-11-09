@@ -27,6 +27,27 @@ listed; see the [upstream releases](https://github.com/charmbracelet/crush/relea
   while another session runs a command in the same folder; the command's
   result says when a change wasn't recorded. Edits you make yourself while
   an agent's shell command runs may be undone along with it.
+- **Lean tool profile.** `option tool-profile lean` trims the built-in
+  tools to a small core and hides MCP tools; `option enable-tool <name>`
+  adds single tools or whole MCP servers back.
+- **Smaller, stable prompt.** Tool descriptions and the coder system prompt
+  were condensed, git status moves out of the system prompt into a hidden
+  first-turn snapshot so the prompt prefix caches across turns, and OpenAI
+  requests carry `prompt_cache_key`.
+- **Budgeted compaction.** Summaries are back-dated to the cut point and
+  requests that overflow the context are retried after compaction.
+- **Per-project skill toggles.** Skills can be enabled or disabled per
+  project from the command palette.
+
+### Changed
+
+- **Breaking: artifact tools are opt-in.** `artifact`, `artifact_data` and
+  `artifact_comments` are no longer sent by default. Add
+  `option enable-tool artifact` (and the other two) to `tadarc` to get them
+  back. `machines` stays on whenever machines are configured.
+- **Breaking: `~/.claude/skills` is no longer loaded by default.** Add
+  `option skill-path ~/.claude/skills` to `tadarc` to keep using those
+  skills.
 
 ## [0.6.2] - 2026-10-23
 

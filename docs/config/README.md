@@ -652,7 +652,8 @@ option ui completions-max-items 200
 > [!IMPORTANT]
 > These skill paths load by default — you do NOT need `skill-path`
 > for them: `.agents/skills`, `.tada/skills`, `.claude/skills`,
-> `.cursor/skills`.
+> `.cursor/skills`. Claude Code's user skills (`~/.claude/skills`) are not
+> loaded by default; opt in with `option skill-path ~/.claude/skills`.
 
 > [!NOTE]
 > The command palette's "Disable Background Color" and "Disable Mouse" 
