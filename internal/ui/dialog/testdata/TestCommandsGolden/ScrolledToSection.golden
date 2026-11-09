@@ -12,7 +12,6 @@
                │                                                                    │
                │ > Type to filter                                                   │
                │                                                                    │
-               │ Switch Model                                               ctrl+l  │
                │ Machines                                                           │
                │ Control ────────────────────────────────────────────────────────── │
                │ Toggle Auto Mode                                           ctrl+y  │
@@ -23,6 +22,7 @@
                │ Merge Board                                                        │
                │ Review each swarm machine's branch, then merge or discard it.      │
                │ Tools ──────────────────────────────────────────────────────────── │
+               │ Toggle Skills                                                      │
                │ Open Artifacts Gallery                                             │
                │ View ───────────────────────────────────────────────────────────── │
                │ Notification Style                                                 │

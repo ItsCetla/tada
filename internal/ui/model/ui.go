@@ -379,6 +379,10 @@ type UI struct {
 
 	// skills
 	skillStates []*skills.SkillState
+	// skillLocalDisabled and skillLocalEnabled cache this repository's
+	// skill overrides so renders need not query the workspace.
+	skillLocalDisabled []string
+	skillLocalEnabled  []string
 
 	// sidebarLogo keeps a cached version of the sidebar sidebarLogo.
 	sidebarLogo string
@@ -656,6 +660,9 @@ func (m *UI) Init() tea.Cmd {
 	}
 	// load the user commands async
 	cmds = append(cmds, m.loadCustomCommands())
+	if cmd := m.loadSkillOverrides(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	// Check the user's machines once, so /model shows how many are ready
 	// and the first prompt already knows their live agent counts.
 	if m.com != nil && m.com.Workspace != nil {
@@ -1246,6 +1253,9 @@ func (m *UI) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case pubsub.Event[skills.Event]:
 		m.skillStates = msg.Payload.States
+	case skillOverridesLoadedMsg:
+		m.skillLocalDisabled = msg.disabled
+		m.skillLocalEnabled = msg.enabled
 	case pubsub.Event[mcp.Event]:
 		switch msg.Payload.Type {
 		case mcp.EventStateChanged:
@@ -2824,6 +2834,8 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		cmds = append(cmds, m.disableDockerMCP)
 	case dialog.ActionToggleMCP:
 		cmds = append(cmds, m.applyMCPToggle(msg))
+	case dialog.ActionToggleSkill:
+		cmds = append(cmds, m.applySkillToggle(msg))
 	case dialog.ActionInitializeProject:
 		if m.isAgentBusy() {
 			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before summarizing session..."))
@@ -2837,35 +2849,9 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			cmds = append(cmds, cmd)
 		}
 	case dialog.ActionSelectReasoningEffort:
-		if m.isAgentBusy() {
-			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait..."))
-			break
+		if cmd := m.selectReasoningEffort(msg.Effort); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
-
-		cfg := m.com.Config()
-		if cfg == nil {
-			cmds = append(cmds, util.ReportError(errors.New("configuration not found")))
-			break
-		}
-
-		agentCfg, ok := cfg.Agents[config.AgentCoder]
-		if !ok {
-			cmds = append(cmds, util.ReportError(errors.New("agent configuration not found")))
-			break
-		}
-
-		currentModel := cfg.Models[agentCfg.Model]
-		currentModel.ReasoningEffort = msg.Effort
-		if err := m.com.Workspace.UpdatePreferredModel(config.ScopeGlobal, agentCfg.Model, currentModel); err != nil {
-			cmds = append(cmds, util.ReportError(err))
-			break
-		}
-
-		cmds = append(cmds, m.updateAgentModelCmd(func() tea.Msg {
-			m.com.Workspace.UpdateAgentModel(context.TODO())
-			return util.NewInfoMsg("Reasoning effort set to " + msg.Effort)
-		}))
-		m.dialog.CloseDialog(dialog.ReasoningID)
 	case dialog.ActionPermissionResponse:
 		m.dialog.CloseDialog(dialog.PermissionsID)
 		switch msg.Action {
@@ -3037,12 +3023,46 @@ func (m *UI) restoreModelFromSession(msgs []message.Message) tea.Cmd {
 	})
 }
 
+// selectReasoningEffort sets the main model's reasoning effort. Like a
+// model switch, it waits only while the session in view is running: runs
+// in other sessions keep the model they started with.
+func (m *UI) selectReasoningEffort(effort string) tea.Cmd {
+	if m.currentSessionBusy() {
+		return util.ReportWarn("Agent is busy, please wait...")
+	}
+
+	cfg := m.com.Config()
+	if cfg == nil {
+		return util.ReportError(errors.New("configuration not found"))
+	}
+
+	agentCfg, ok := cfg.Agents[config.AgentCoder]
+	if !ok {
+		return util.ReportError(errors.New("agent configuration not found"))
+	}
+
+	currentModel := cfg.Models[agentCfg.Model]
+	currentModel.ReasoningEffort = effort
+	if err := m.com.Workspace.UpdatePreferredModel(config.ScopeGlobal, agentCfg.Model, currentModel); err != nil {
+		return util.ReportError(err)
+	}
+
+	m.dialog.CloseDialog(dialog.ReasoningID)
+	return m.updateAgentModelCmd(func() tea.Msg {
+		m.com.Workspace.UpdateAgentModel(context.TODO())
+		return util.NewInfoMsg("Reasoning effort set to " + effort)
+	})
+}
+
 // handleSelectModel performs the model selection.
 func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
 	var cmds []tea.Cmd
 
-	// we ignore dialogs with the oauth id as they need to be able to be dismissed
-	if m.isAgentBusy() && !m.dialog.ContainsDialog(dialog.OAuthID) {
+	// Only the session in view running blocks a switch: other sessions'
+	// runs keep the model they started with (the agent pins it per run).
+	// We ignore dialogs with the oauth id as they need to be able to be
+	// dismissed.
+	if m.currentSessionBusy() && !m.dialog.ContainsDialog(dialog.OAuthID) {
 		return util.ReportWarn("Agent is busy, please wait...")
 	}
 
@@ -6150,6 +6170,10 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		}
 	case dialog.MCPTogglesID:
 		if cmd := m.openMCPTogglesDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case dialog.SkillTogglesID:
+		if cmd := m.openSkillTogglesDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	case dialog.FilePickerID:

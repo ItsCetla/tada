@@ -579,6 +579,29 @@ func (w *AppWorkspace) MCPSetServerConfigDisabled(ctx context.Context, name stri
 	return mcptools.SetConfigDisabled(ctx, w.store, config.ScopeGlobal, name, disabled, override)
 }
 
+// SetSkillDisabled toggles a skill in the global config's disabled_skills
+// list.
+func (w *AppWorkspace) SetSkillDisabled(_ context.Context, name string, disabled bool) error {
+	return w.store.SetSkillDisabled(config.ScopeGlobal, name, disabled)
+}
+
+// SkillsDisabled returns the skills disabled for this repository.
+func (w *AppWorkspace) SkillsDisabled(ctx context.Context) ([]string, error) {
+	return w.app.Sessions.SkillsDisabled(ctx)
+}
+
+// SkillsEnabled returns the skills with a repository-scoped enabled
+// override.
+func (w *AppWorkspace) SkillsEnabled(ctx context.Context) ([]string, error) {
+	return w.app.Sessions.SkillsEnabled(ctx)
+}
+
+// SkillSetLocalDisabled adds or removes a repository-scoped skill override.
+// Config files are never touched; the agent picks it up on its next turn.
+func (w *AppWorkspace) SkillSetLocalDisabled(ctx context.Context, name string, disabled bool) error {
+	return app.SetLocalSkillDisabled(ctx, w.app.Sessions, w.store, name, disabled)
+}
+
 // MCPStartServer starts the named MCP server even when its config entry is
 // disabled. The repository-scoped enabled override recorded by
 // MCPSetServerDisabled makes the start survive restarts. Config files are

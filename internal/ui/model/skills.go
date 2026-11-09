@@ -1,16 +1,22 @@
 package model
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/skills"
 	"github.com/charmbracelet/crush/internal/ui/common"
+	"github.com/charmbracelet/crush/internal/ui/dialog"
 	"github.com/charmbracelet/crush/internal/ui/styles"
+	"github.com/charmbracelet/crush/internal/ui/util"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -20,6 +26,9 @@ type skillStatusItem struct {
 	title string
 	// description is reserved for future use (e.g. showing error details).
 	description string
+	// disabled reports that the skill is turned off; it is still listed,
+	// muted.
+	disabled bool
 }
 
 var builtinSkillsCache struct {
@@ -54,18 +63,45 @@ func (m *UI) skillsInfo(width, maxItems int, isSection bool) string {
 	return lipgloss.NewStyle().Width(width).Render(fmt.Sprintf("%s\n\n%s", title, list))
 }
 
+// effectiveDisabledSkills returns the config's disabled_skills merged
+// with this repository's cached overrides, as a set.
+func (m *UI) effectiveDisabledSkills() map[string]bool {
+	set := make(map[string]bool)
+	if m.com == nil || m.com.Workspace == nil {
+		return set
+	}
+	var global []string
+	if cfg := m.com.Config(); cfg != nil && cfg.Options != nil {
+		global = cfg.Options.DisabledSkills
+	}
+	for _, name := range config.EffectiveDisabledSkills(global, m.skillLocalDisabled, m.skillLocalEnabled) {
+		set[name] = true
+	}
+	return set
+}
+
 func (m *UI) skillStatusItems() []skillStatusItem {
 	t := m.com.Styles
 	var items []skillStatusItem
 	stateNames := make(map[string]struct{}, len(m.skillStates))
 
-	disabledSet := make(map[string]bool)
-	if m.com != nil && m.com.Workspace != nil {
-		if cfg := m.com.Config(); cfg != nil {
-			for _, name := range cfg.Options.DisabledSkills {
-				disabledSet[name] = true
-			}
+	disabledSet := m.effectiveDisabledSkills()
+	item := func(name string, failed bool) skillStatusItem {
+		it := skillStatusItem{
+			icon:  t.Resource.OnlineIcon.String(),
+			name:  name,
+			title: t.Resource.Name.Render(name),
 		}
+		switch {
+		case failed:
+			it.icon = t.Resource.ErrorIcon.String()
+			it.disabled = disabledSet[name]
+		case disabledSet[name]:
+			it.icon = t.Resource.DisabledIcon.String()
+			it.title = t.Resource.AdditionalText.Render(name)
+			it.disabled = true
+		}
+		return it
 	}
 
 	states := slices.Clone(m.skillStates)
@@ -77,22 +113,11 @@ func (m *UI) skillStatusItems() []skillStatusItem {
 		if name == "" {
 			name = filepath.Base(filepath.Dir(state.Path))
 		}
-		if disabledSet[name] {
-			continue
-		}
 		if _, exists := stateNames[name]; exists {
 			continue
 		}
 		stateNames[name] = struct{}{}
-		icon := t.Resource.OnlineIcon.String()
-		if state.State == skills.StateError {
-			icon = t.Resource.ErrorIcon.String()
-		}
-		items = append(items, skillStatusItem{
-			icon:  icon,
-			name:  name,
-			title: t.Resource.Name.Render(name),
-		})
+		items = append(items, item(name, state.State == skills.StateError))
 	}
 
 	builtin := cachedBuiltinSkills()
@@ -103,14 +128,7 @@ func (m *UI) skillStatusItems() []skillStatusItem {
 		if _, ok := stateNames[skill.Name]; ok {
 			continue
 		}
-		if disabledSet[skill.Name] {
-			continue
-		}
-		items = append(items, skillStatusItem{
-			icon:  t.Resource.OnlineIcon.String(),
-			name:  skill.Name,
-			title: t.Resource.Name.Render(skill.Name),
-		})
+		items = append(items, item(skill.Name, false))
 	}
 
 	slices.SortStableFunc(items, func(a, b skillStatusItem) int {
@@ -118,6 +136,170 @@ func (m *UI) skillStatusItems() []skillStatusItem {
 	})
 
 	return items
+}
+
+// skillsCountText renders the landing heading's count: the number of
+// skills, or "N active · M off" when some are turned off.
+func skillsCountText(items []skillStatusItem) string {
+	off := 0
+	for _, it := range items {
+		if it.disabled {
+			off++
+		}
+	}
+	if off == 0 {
+		return fmt.Sprint(len(items))
+	}
+	return fmt.Sprintf("%d active · %d off", len(items)-off, off)
+}
+
+// skillOverridesLoadedMsg carries this repository's skill overrides.
+type skillOverridesLoadedMsg struct {
+	disabled []string
+	enabled  []string
+}
+
+// loadSkillOverrides reads the repository's skill overrides so the
+// sidebar and landing can show the effective state without querying the
+// workspace on every render.
+func (m *UI) loadSkillOverrides() tea.Cmd {
+	if m.com == nil || m.com.Workspace == nil {
+		return nil
+	}
+	ws := m.com.Workspace
+	return func() tea.Msg {
+		ctx := context.Background()
+		disabled, err := ws.SkillsDisabled(ctx)
+		if err != nil {
+			slog.Warn("Failed to load disabled skill overrides", "error", err)
+			return nil
+		}
+		enabled, err := ws.SkillsEnabled(ctx)
+		if err != nil {
+			slog.Warn("Failed to load enabled skill overrides", "error", err)
+			return nil
+		}
+		return skillOverridesLoadedMsg{disabled: disabled, enabled: enabled}
+	}
+}
+
+// openSkillTogglesDialog opens the skill toggles dialog.
+func (m *UI) openSkillTogglesDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.SkillTogglesID) {
+		m.dialog.BringToFront(dialog.SkillTogglesID)
+		return nil
+	}
+	items, err := m.skillToggleItems()
+	if err != nil {
+		return util.ReportError(err)
+	}
+	m.dialog.OpenDialog(dialog.NewSkillToggles(m.com, items))
+	return nil
+}
+
+// skillToggleItems builds the dialog items from the discovered and
+// builtin skills, the config's disabled_skills, and the repository's
+// overrides.
+func (m *UI) skillToggleItems() ([]dialog.SkillToggleItem, error) {
+	ctx := context.Background()
+	localDisabled, err := m.com.Workspace.SkillsDisabled(ctx)
+	if err != nil {
+		return nil, err
+	}
+	localEnabled, err := m.com.Workspace.SkillsEnabled(ctx)
+	if err != nil {
+		return nil, err
+	}
+	m.skillLocalDisabled, m.skillLocalEnabled = localDisabled, localEnabled
+
+	toSet := func(names []string) map[string]bool {
+		set := make(map[string]bool, len(names))
+		for _, n := range names {
+			set[n] = true
+		}
+		return set
+	}
+	var configDisabled []string
+	if cfg := m.com.Config(); cfg != nil && cfg.Options != nil {
+		configDisabled = cfg.Options.DisabledSkills
+	}
+	cfgSet, offSet, onSet := toSet(configDisabled), toSet(localDisabled), toSet(localEnabled)
+
+	seen := make(map[string]bool)
+	var items []dialog.SkillToggleItem
+	add := func(name, source string, failed bool) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		items = append(items, dialog.SkillToggleItem{
+			Name:            name,
+			Source:          source,
+			Disabled:        offSet[name],
+			ConfigDisabled:  cfgSet[name],
+			EnabledOverride: onSet[name],
+			Error:           failed,
+		})
+	}
+
+	states := slices.Clone(m.skillStates)
+	slices.SortStableFunc(states, func(a, b *skills.SkillState) int {
+		return strings.Compare(a.Path, b.Path)
+	})
+	for _, state := range states {
+		name := state.Name
+		if name == "" {
+			name = filepath.Base(filepath.Dir(state.Path))
+		}
+		add(name, skillSource(state.Path, m.com.Workspace.WorkingDir()), state.State == skills.StateError)
+	}
+	for _, skill := range cachedBuiltinSkills() {
+		add(skill.Name, "builtin", false)
+	}
+	slices.SortStableFunc(items, func(a, b dialog.SkillToggleItem) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	return items, nil
+}
+
+// skillSource labels where a discovered skill lives: builtin skills,
+// skills under the working directory ("project"), or anything else
+// ("user").
+func skillSource(path, workingDir string) string {
+	if strings.HasPrefix(path, skills.BuiltinPrefix) {
+		return "builtin"
+	}
+	if workingDir != "" && strings.HasPrefix(path, workingDir+string(filepath.Separator)) {
+		return "project"
+	}
+	return "user"
+}
+
+// applySkillToggle persists a skill toggle. Local toggles write a
+// repository-scoped override; global toggles write the config's
+// disabled_skills. The change applies from the agent's next turn. The
+// cached overrides are refreshed afterwards for the sidebar.
+func (m *UI) applySkillToggle(msg dialog.ActionToggleSkill) tea.Cmd {
+	name := msg.Name
+	disable := msg.Disabled
+	status := "enabled"
+	if disable {
+		status = "disabled"
+	}
+	ws := m.com.Workspace
+	apply := func() tea.Msg {
+		if msg.Global {
+			if err := ws.SetSkillDisabled(context.TODO(), name, disable); err != nil {
+				return util.NewErrorMsg(err)
+			}
+			return util.NewInfoMsg(fmt.Sprintf("Skill %q %s globally", name, status))
+		}
+		if err := ws.SkillSetLocalDisabled(context.TODO(), name, disable); err != nil {
+			return util.NewErrorMsg(err)
+		}
+		return util.NewInfoMsg(fmt.Sprintf("Skill %q %s for this repository", name, status))
+	}
+	return tea.Sequence(apply, m.loadSkillOverrides())
 }
 
 func skillsList(t *styles.Styles, items []skillStatusItem, width, maxItems int) string {
@@ -156,7 +338,7 @@ func (m *UI) skillsGrid(width, height int) string {
 	if len(items) == 0 {
 		return lipgloss.NewStyle().Width(width).Render(title + "\n\n" + t.Resource.AdditionalText.Render("None"))
 	}
-	title += " " + t.Resource.AdditionalText.Render(fmt.Sprint(len(items)))
+	title += " " + t.Resource.AdditionalText.Render(skillsCountText(items))
 
 	rows := height - 2 // heading + blank line
 	if rows <= 0 {

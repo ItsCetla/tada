@@ -646,6 +646,10 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		}).InGroup(CommandGroupTools))
 	}
 
+	commands = append(commands, NewCommandItem(c.com.Styles, "toggle_skills", "Toggle Skills", "", ActionOpenDialog{
+		DialogID: SkillTogglesID,
+	}).InGroup(CommandGroupTools))
+
 	if c.hasTodos || c.hasQueue {
 		var label string
 		switch {

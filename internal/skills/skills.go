@@ -308,17 +308,37 @@ func ToPromptXML(skills []*Skill) string {
 		if s.DisableModelInvocation {
 			continue
 		}
-		sb.WriteString("  <skill>\n")
-		fmt.Fprintf(&sb, "    <name>%s</name>\n", escape(s.Name))
-		fmt.Fprintf(&sb, "    <description>%s</description>\n", escape(s.Description))
-		fmt.Fprintf(&sb, "    <location>%s</location>\n", escape(s.SkillFilePath))
+		fmt.Fprintf(&sb, `<skill name="%s" location="%s"`, escape(s.Name), escape(s.SkillFilePath))
 		if s.Builtin {
-			sb.WriteString("    <type>builtin</type>\n")
+			sb.WriteString(` type="builtin"`)
 		}
-		sb.WriteString("  </skill>\n")
+		fmt.Fprintf(&sb, ">%s</skill>\n", escape(listingDescription(s.Description)))
 	}
 	sb.WriteString("</available_skills>")
 	return sb.String()
+}
+
+// maxListingDescription caps each skill's description in the
+// <available_skills> listing, in runes. The listing is sent on every turn,
+// and the full SKILL.md is read when the skill is used, so the listing only
+// needs enough to trigger it. 250 keeps the start of the "Use when ..."
+// clause, which most descriptions put within the first 250 characters.
+const maxListingDescription = 250
+
+// listingDescription shortens desc for the skill listing: it collapses
+// whitespace and, past maxListingDescription runes, cuts at the last word
+// boundary and adds an ellipsis.
+func listingDescription(desc string) string {
+	desc = strings.Join(strings.Fields(desc), " ")
+	runes := []rune(desc)
+	if len(runes) <= maxListingDescription {
+		return desc
+	}
+	cut := string(runes[:maxListingDescription-1])
+	if i := strings.LastIndexByte(cut, ' '); i > 0 {
+		cut = cut[:i]
+	}
+	return strings.TrimRight(cut, " ,;:.-") + "…"
 }
 
 // FormatInvocation generates XML for a skill when invoked as a user command.

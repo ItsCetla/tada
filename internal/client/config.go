@@ -372,6 +372,76 @@ func (c *Client) SetMCPServerConfigDisabled(ctx context.Context, id, name string
 	return nil
 }
 
+// SetSkillDisabled toggles a skill in the global config's disabled_skills
+// list on the workspace's server.
+func (c *Client) SetSkillDisabled(ctx context.Context, id, name string, disabled bool) error {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/skills/disabled", id), nil, jsonBody(proto.SkillSetDisabledRequest{
+		Name:     name,
+		Disabled: disabled,
+	}), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return fmt.Errorf("failed to set skill disabled: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to set skill disabled: status code %d", rsp.StatusCode)
+	}
+	return nil
+}
+
+// SkillsDisabled returns the skills disabled for the workspace's
+// repository.
+func (c *Client) SkillsDisabled(ctx context.Context, id string) ([]string, error) {
+	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/skills/local-disabled", id), nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get locally disabled skills: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get locally disabled skills: status code %d", rsp.StatusCode)
+	}
+	var names []string
+	if err := json.NewDecoder(rsp.Body).Decode(&names); err != nil {
+		return nil, fmt.Errorf("failed to decode locally disabled skills: %w", err)
+	}
+	return names, nil
+}
+
+// SkillsEnabled returns the skills with a repository-scoped
+// enabled override for the workspace's repository.
+func (c *Client) SkillsEnabled(ctx context.Context, id string) ([]string, error) {
+	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/skills/local-enabled", id), nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get locally enabled skills: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get locally enabled skills: status code %d", rsp.StatusCode)
+	}
+	var names []string
+	if err := json.NewDecoder(rsp.Body).Decode(&names); err != nil {
+		return nil, fmt.Errorf("failed to decode locally enabled skills: %w", err)
+	}
+	return names, nil
+}
+
+// SetLocalSkillDisabled toggles a repository-scoped skill override on the
+// workspace.
+func (c *Client) SetLocalSkillDisabled(ctx context.Context, id, name string, disabled bool) error {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/skills/local-disabled", id), nil, jsonBody(proto.SkillSetDisabledRequest{
+		Name:     name,
+		Disabled: disabled,
+	}), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return fmt.Errorf("failed to set local skill override: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to set local skill override: status code %d", rsp.StatusCode)
+	}
+	return nil
+}
+
 // RefreshMCPTools refreshes tools for a named MCP server.
 func (c *Client) RefreshMCPTools(ctx context.Context, id, name string) error {
 	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/mcp/refresh-tools", id), nil, jsonBody(struct {

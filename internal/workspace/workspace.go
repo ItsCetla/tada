@@ -273,6 +273,15 @@ type Workspace interface {
 	MCPServersDisabled(ctx context.Context) ([]string, error)
 	MCPSetServerDisabled(ctx context.Context, name string, disabled bool) error
 	MCPSetServerConfigDisabled(ctx context.Context, name string, disabled bool) error
+	// SetSkillDisabled adds or removes name in the global config's
+	// disabled_skills list. The agent picks it up on its next turn.
+	SetSkillDisabled(ctx context.Context, name string, disabled bool) error
+	// SkillsDisabled and SkillsEnabled return the repository-scoped skill
+	// overrides; SkillSetLocalDisabled records one. Like MCP toggles, a
+	// local override wins over the config in both directions.
+	SkillsDisabled(ctx context.Context) ([]string, error)
+	SkillsEnabled(ctx context.Context) ([]string, error)
+	SkillSetLocalDisabled(ctx context.Context, name string, disabled bool) error
 	MCPServersEnabled(ctx context.Context) ([]string, error)
 	MCPStartServer(ctx context.Context, name string) error
 	MCPAuthenticate(ctx context.Context, name string) error

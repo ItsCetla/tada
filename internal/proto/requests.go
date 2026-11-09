@@ -143,6 +143,13 @@ type MCPSetServerDisabledRequest struct {
 	Disabled bool   `json:"disabled"`
 }
 
+// SkillSetDisabledRequest toggles a skill in the global config's
+// disabled_skills list.
+type SkillSetDisabledRequest struct {
+	Name     string `json:"name"`
+	Disabled bool   `json:"disabled"`
+}
+
 // MCPPendingAuthServer describes an MCP server awaiting OAuth
 // authentication, returned to clients so they can prompt the user.
 type MCPPendingAuthServer struct {

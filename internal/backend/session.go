@@ -4,6 +4,7 @@ import (
 	"context"
 
 	mcptools "github.com/charmbracelet/crush/internal/agent/tools/mcp"
+	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/proto"
@@ -195,6 +196,46 @@ func (b *Backend) SetMCPServerConfigDisabled(ctx context.Context, workspaceID, n
 		return err
 	}
 	return mcptools.SetConfigDisabled(ctx, ws.Cfg, config.ScopeGlobal, name, disabled, override)
+}
+
+// SetSkillDisabled toggles a skill in the global config's disabled_skills
+// list for the given workspace.
+func (b *Backend) SetSkillDisabled(workspaceID, name string, disabled bool) error {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return err
+	}
+	return ws.Cfg.SetSkillDisabled(config.ScopeGlobal, name, disabled)
+}
+
+// SkillsDisabled returns the skills disabled for the given workspace's
+// repository.
+func (b *Backend) SkillsDisabled(ctx context.Context, workspaceID string) ([]string, error) {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	return ws.Sessions.SkillsDisabled(ctx)
+}
+
+// SkillsEnabled returns the skills with a repository-scoped enabled
+// override for the given workspace.
+func (b *Backend) SkillsEnabled(ctx context.Context, workspaceID string) ([]string, error) {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	return ws.Sessions.SkillsEnabled(ctx)
+}
+
+// SetLocalSkillDisabled toggles a repository-scoped skill override for the
+// given workspace. The agent picks it up on its next turn.
+func (b *Backend) SetLocalSkillDisabled(ctx context.Context, workspaceID, name string, disabled bool) error {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return err
+	}
+	return app.SetLocalSkillDisabled(ctx, ws.Sessions, ws.Cfg, name, disabled)
 }
 
 // StartMCPServer starts the named MCP server for the given workspace even

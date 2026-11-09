@@ -837,6 +837,26 @@ func (w *ClientWorkspace) MCPSetServerConfigDisabled(ctx context.Context, name s
 	return w.client.SetMCPServerConfigDisabled(ctx, w.workspaceID(), name, disabled)
 }
 
+func (w *ClientWorkspace) SetSkillDisabled(ctx context.Context, name string, disabled bool) error {
+	if err := w.client.SetSkillDisabled(ctx, w.workspaceID(), name, disabled); err != nil {
+		return err
+	}
+	w.refreshWorkspace()
+	return nil
+}
+
+func (w *ClientWorkspace) SkillsDisabled(ctx context.Context) ([]string, error) {
+	return w.client.SkillsDisabled(ctx, w.workspaceID())
+}
+
+func (w *ClientWorkspace) SkillsEnabled(ctx context.Context) ([]string, error) {
+	return w.client.SkillsEnabled(ctx, w.workspaceID())
+}
+
+func (w *ClientWorkspace) SkillSetLocalDisabled(ctx context.Context, name string, disabled bool) error {
+	return w.client.SetLocalSkillDisabled(ctx, w.workspaceID(), name, disabled)
+}
+
 func (w *ClientWorkspace) MCPStartServer(ctx context.Context, name string) error {
 	return w.client.StartMCPServer(ctx, w.workspaceID(), name)
 }

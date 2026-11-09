@@ -164,7 +164,7 @@ func (m *Manager) Shutdown() {
 
 // DiscoverFromConfig walks the embedded builtin FS and every path in
 // cfg.Options.SkillsPaths (after home / env expansion), then dedups and
-// filters by cfg.Options.DisabledSkills. It returns the three slices the
+// filters by cfg.DisabledSkills (the effective disabled set). It returns the three slices the
 // rest of the system needs:
 //
 //   - allSkills:    deduplicated, pre-filter (includes disabled).

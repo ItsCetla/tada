@@ -449,6 +449,7 @@ func (b *Backend) CreateWorkspace(args proto.Workspace) (*Workspace, proto.Works
 	// hosts multiple workspaces concurrently, so the manager is
 	// constructed WITHOUT WithGlobalMirror to prevent last-writer-wins
 	// cross-talk between workspaces.
+	app.LoadSkillOverrides(b.ctx, conn, cfg)
 	discoveryCfg := skillsDiscoveryConfig(cfg)
 	allSkills, activeSkills, skillStates := skills.DiscoverFromConfig(discoveryCfg)
 	skillsMgr := skills.NewManager(
@@ -538,7 +539,7 @@ func skillsDiscoveryConfig(cfg *config.ConfigStore) skills.DiscoveryConfig {
 	var paths, disabled []string
 	if opts != nil {
 		paths = opts.SkillsPaths
-		disabled = opts.DisabledSkills
+		disabled = cfg.EffectiveDisabledSkills()
 	}
 	var resolver func(string) (string, error)
 	if r := cfg.Resolver(); r != nil {

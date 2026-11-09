@@ -119,6 +119,11 @@ type ConfigStore struct {
 	mu      sync.Mutex   // serialises config file writes
 	writeMu sync.RWMutex // serialises in-memory config production (mutators + reload); RLock for readers
 
+	// localSkills holds the repository-scoped skill overrides, loaded from
+	// the project database. They live outside Config so reloads keep them.
+	localSkills   localSkillOverrides
+	localSkillsMu sync.RWMutex
+
 	// refreshSF collapses concurrent in-process OAuth refreshes for the
 	// same provider into a single attempt. Combined with the per-provider
 	// cross-process refresh lock, it ensures only one token exchange runs

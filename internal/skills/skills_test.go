@@ -307,8 +307,8 @@ func TestToPromptXML(t *testing.T) {
 	xml := ToPromptXML(skills)
 
 	require.Contains(t, xml, "<available_skills>")
-	require.Contains(t, xml, "<name>pdf-processing</name>")
-	require.Contains(t, xml, "<description>Extracts text from PDFs.</description>")
+	require.Contains(t, xml, `<skill name="pdf-processing" location="/skills/pdf-processing/SKILL.md">`)
+	require.Contains(t, xml, ">Extracts text from PDFs.</skill>")
 	require.Contains(t, xml, "&amp;") // XML escaping
 }
 
@@ -322,8 +322,25 @@ func TestToPromptXMLDisableModelInvocation(t *testing.T) {
 
 	xml := ToPromptXML(skills)
 
-	require.Contains(t, xml, "<name>visible-skill</name>")
-	require.NotContains(t, xml, "<name>hidden-skill</name>")
+	require.Contains(t, xml, `name="visible-skill"`)
+	require.NotContains(t, xml, `name="hidden-skill"`)
+}
+
+func TestToPromptXMLCapsDescription(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("word ", 100) + "end"
+	skills := []*Skill{{Name: "long-skill", Description: long, SkillFilePath: "/skills/long/SKILL.md"}}
+	xml := ToPromptXML(skills)
+
+	require.Contains(t, xml, `name="long-skill"`)
+	require.Contains(t, xml, `location="/skills/long/SKILL.md"`)
+	require.NotContains(t, xml, "end</skill>")
+	require.Contains(t, xml, "word…</skill>")
+
+	got := listingDescription(long)
+	require.LessOrEqual(t, len([]rune(got)), maxListingDescription)
+	require.Equal(t, "short one", listingDescription("short\n  one"))
 }
 
 func TestToPromptXMLEmpty(t *testing.T) {
@@ -368,8 +385,8 @@ func TestToPromptXMLBuiltinType(t *testing.T) {
 		{Name: "user-skill", Description: "A user skill.", SkillFilePath: "/home/user/.config/tada/skills/user-skill/SKILL.md"},
 	}
 	xml := ToPromptXML(skills)
-	require.Contains(t, xml, "<type>builtin</type>")
-	require.Equal(t, 1, strings.Count(xml, "<type>builtin</type>"))
+	require.Contains(t, xml, `<skill name="builtin-skill" location="tada://skills/builtin-skill/SKILL.md" type="builtin">A builtin.</skill>`)
+	require.Equal(t, 1, strings.Count(xml, `type="builtin"`))
 }
 
 func TestParseContent(t *testing.T) {
