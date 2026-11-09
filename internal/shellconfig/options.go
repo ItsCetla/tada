@@ -180,7 +180,7 @@ func handleOption(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		}
 		n, err := strconv.Atoi(val)
 		if err != nil {
-			return usage(stderr, fmt.Sprintf("option: %s expects a number of seconds, got %q", key, val))
+			return usage(stderr, fmt.Sprintf("option: %s expects a number, got %q", key, val))
 		}
 		o[spec.jsonKey] = n
 		slog.Info("Option set in shell config", "key", key, "value", n)
@@ -254,14 +254,26 @@ var optionSpecs = map[string]optionSpec{
 	"sandbox":         {jsonKey: "sandbox", kind: optString, allowed: []string{"off", "read-only", "workspace-write"}},
 	"sandbox-network": {jsonKey: "sandbox_network", kind: optBool},
 
+	// Claude Code engine: load only Ta-Da's own MCP servers.
+	"claude-code-strict-mcp": {jsonKey: "claude_code_strict_mcp", kind: optBool},
+
+	// Built-in tool set: full (default) or lean; see config.leanTools.
+	// Lean also hides MCP tools unless enable-tool names them.
+	"tool-profile": {jsonKey: "tool_profile", kind: optString, allowed: []string{"full", "lean"}},
+
 	// Integer fields, in seconds.
 	"request-timeout": {jsonKey: "request_timeout", kind: optInt},
+
+	// Integer fields, in tokens; see config.Options.CompactionReserveTokens.
+	"compaction-reserve-tokens":     {jsonKey: "compaction_reserve_tokens", kind: optInt},
+	"compaction-keep-recent-tokens": {jsonKey: "compaction_keep_recent_tokens", kind: optInt},
 
 	// List fields. Keys are singular because each call appends one value.
 	"context-path":        {jsonKey: "context_paths", kind: optList},
 	"global-context-path": {jsonKey: "global_context_paths", kind: optList},
 	"skill-path":          {jsonKey: "skills_paths", kind: optList},
 	"disable-skill":       {jsonKey: "disabled_skills", kind: optList},
+	"enable-tool":         {jsonKey: "enabled_tools", kind: optList},
 	// Only honored in the global tadarc; see config.Options.TrustedPaths.
 	"trusted-path": {jsonKey: "trusted_paths", kind: optList},
 }

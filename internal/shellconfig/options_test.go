@@ -300,7 +300,38 @@ func TestOption_RequestTimeoutInvalid(t *testing.T) {
 
 	_, err := LoadShellConfig(t.Context(), path, []byte(script))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "expects a number of seconds")
+	require.Contains(t, err.Error(), "expects a number")
+}
+
+func TestOption_CompactionTokens(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		script  string
+		key     string
+		want    float64
+		wantErr bool
+	}{
+		{"reserve", "option compaction-reserve-tokens 32768", "compaction_reserve_tokens", 32768, false},
+		{"keep recent", "option compaction-keep-recent-tokens 40000", "compaction_keep_recent_tokens", 40000, false},
+		{"not a number", "option compaction-keep-recent-tokens lots", "", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "tadarc")
+			jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(tc.script))
+			if tc.wantErr {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "expects a number")
+				return
+			}
+			require.NoError(t, err)
+			var result map[string]any
+			require.NoError(t, json.Unmarshal(jsonBytes, &result))
+			require.Equal(t, tc.want, result["options"].(map[string]any)[tc.key])
+		})
+	}
 }
 
 func TestOption_Sandbox(t *testing.T) {
@@ -414,4 +445,37 @@ func TestOption_UITextWidth(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "expects a non-negative integer")
 	}
+}
+
+func TestOption_ClaudeCodeStrictMCP(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "tadarc")
+	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte("option claude-code-strict-mcp true"))
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(jsonBytes, &result))
+
+	opts := result["options"].(map[string]any)
+	require.Equal(t, true, opts["claude_code_strict_mcp"])
+}
+
+func TestOption_ToolProfile(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "tadarc")
+	src := "option tool-profile lean\noption enable-tool lsp_rename\noption enable-tool lsp_replace_symbol"
+	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(src))
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(jsonBytes, &result))
+
+	opts := result["options"].(map[string]any)
+	require.Equal(t, "lean", opts["tool_profile"])
+	require.Equal(t, []any{"lsp_rename", "lsp_replace_symbol"}, opts["enabled_tools"])
+
+	_, err = LoadShellConfig(t.Context(), path, []byte("option tool-profile tiny"))
+	require.Error(t, err)
 }

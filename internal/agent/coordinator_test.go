@@ -3,12 +3,15 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/anthropic"
+	"charm.land/fantasy/providers/azure"
 	"charm.land/fantasy/providers/bedrock"
+	"charm.land/fantasy/providers/openai"
 	"charm.land/fantasy/providers/openaicompat"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/discover"
@@ -835,4 +838,57 @@ func TestCoordinatorSetMainAgent(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errMainAgentNotFound)
 	})
+}
+
+func TestOpenAICacheHints(t *testing.T) {
+	t.Parallel()
+	longID := strings.Repeat("s", 80)
+	for _, modelID := range []string{"gpt-4o", "gpt-5"} {
+		model := Model{
+			CatwalkCfg: catwalk.Model{ID: modelID},
+			ModelCfg:   config.SelectedModel{Provider: "openai"},
+		}
+		official := config.ProviderConfig{ID: "openai", Type: catwalk.Type(openai.Name)}
+		opts := withPromptCacheKey(getProviderOptions(model, official), official, longID)
+
+		var store *bool
+		var key *string
+		switch o := opts[openai.Name].(type) {
+		case *openai.ProviderOptions:
+			store, key = o.Store, o.PromptCacheKey
+		case *openai.ResponsesProviderOptions:
+			store, key = o.Store, o.PromptCacheKey
+		default:
+			t.Fatalf("%s: unexpected options %T", modelID, o)
+		}
+		require.NotNil(t, store, modelID)
+		require.False(t, *store, modelID)
+		require.NotNil(t, key, modelID)
+		require.Equal(t, longID[:64], *key, modelID)
+
+		// A compatible server behind a custom base URL gets neither field.
+		custom := config.ProviderConfig{ID: "openai", Type: catwalk.Type(openai.Name), BaseURL: "http://localhost:1234/v1"}
+		opts = withPromptCacheKey(getProviderOptions(model, custom), custom, longID)
+		switch o := opts[openai.Name].(type) {
+		case *openai.ProviderOptions:
+			require.Nil(t, o.Store, modelID)
+			require.Nil(t, o.PromptCacheKey, modelID)
+		case *openai.ResponsesProviderOptions:
+			require.Nil(t, o.Store, modelID)
+			require.Nil(t, o.PromptCacheKey, modelID)
+		}
+
+		// Azure gets neither field: older api-versions and Foundry
+		// deployments reject them.
+		az := config.ProviderConfig{ID: "azure", Type: catwalk.Type(azure.Name)}
+		opts = withPromptCacheKey(getProviderOptions(model, az), az, longID)
+		switch o := opts[openai.Name].(type) {
+		case *openai.ProviderOptions:
+			require.Nil(t, o.Store, modelID)
+			require.Nil(t, o.PromptCacheKey, modelID)
+		case *openai.ResponsesProviderOptions:
+			require.Nil(t, o.Store, modelID)
+			require.Nil(t, o.PromptCacheKey, modelID)
+		}
+	}
 }

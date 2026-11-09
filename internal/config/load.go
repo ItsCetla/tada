@@ -1205,7 +1205,9 @@ func projectBoundary(dir string) string {
 
 // GlobalSkillsDirs returns the default directories for Agent Skills.
 // Skills in these directories are auto-discovered and their files can be read
-// without permission prompts.
+// without permission prompts. Claude Code's user skills (~/.claude/skills) are
+// not included by default; opt in with "option skill-path ~/.claude/skills"
+// in tadarc.
 func GlobalSkillsDirs() []string {
 	if crushSkills := os.Getenv("TADA_SKILLS_DIR"); crushSkills != "" {
 		return []string{crushSkills}
@@ -1216,7 +1218,6 @@ func GlobalSkillsDirs() []string {
 		filepath.Join(home.Config(), "agents", "skills"),
 		// Per the Agent Skills spec, scan ~/.agents/skills
 		filepath.Join(home.Dir(), ".agents", "skills"),
-		filepath.Join(home.Dir(), ".claude", "skills"),
 	}
 
 	// On Windows, also load from app data on top of `$HOME/.config/tada`.

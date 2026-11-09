@@ -722,6 +722,15 @@
           "type": "string",
           "description": "Anything else the AI should know about the machine"
         },
+        "use": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "named"
+          ],
+          "description": "How agents use the machine: auto (picked whenever it has a free slot) or named (only when asked for by name)",
+          "default": "auto"
+        },
         "disabled": {
           "type": "boolean",
           "description": "Keep the machine configured but don't use it",
@@ -1067,6 +1076,17 @@
           "type": "array",
           "description": "List of built-in tools to disable and hide from the agent"
         },
+        "enabled_tools": {
+          "items": {
+            "type": "string",
+            "examples": [
+              "artifact",
+              "machines"
+            ]
+          },
+          "type": "array",
+          "description": "Built-in tools that are off by default to turn on for the agent: artifact, artifact_data, artifact_comments and machines. machines is also on whenever machines are configured"
+        },
         "disable_provider_auto_update": {
           "type": "boolean",
           "description": "Deprecated: has no effect. The provider catalog is never updated automatically; run tada update-providers to update it.",
@@ -1192,6 +1212,36 @@
           "type": "boolean",
           "description": "Let sandboxed shell commands use the network. When on, commands ask for permission as usual",
           "default": false
+        },
+        "claude_code_strict_mcp": {
+          "type": "boolean",
+          "description": "Run the Claude Code engine with --strict-mcp-config so it loads only Ta-Da's own MCP servers and ignores the MCP servers from your Claude Code settings. Faster turns and fewer tool tokens; your claude.ai connectors and global MCP servers are then unavailable inside Ta-Da",
+          "default": false
+        },
+        "tool_profile": {
+          "type": "string",
+          "enum": [
+            "full",
+            "lean"
+          ],
+          "description": "Built-in tool set for the agents. lean keeps only the core tools (agent, bash, edit, multiedit, view, write, grep, glob, ls and question); list tools in enabled_tools to add individual ones back. lean also hides MCP server tools unless enabled_tools lists the tool name (mcp_\u003cserver\u003e_\u003ctool\u003e) or mcp_\u003cserver\u003e",
+          "default": "full"
+        },
+        "compaction_reserve_tokens": {
+          "type": "integer",
+          "description": "Tokens to keep free in the context window. The conversation is summarized once the prompt grows past the window minus this reserve (and the reply limit). Capped at half the window",
+          "default": 16384,
+          "examples": [
+            32768
+          ]
+        },
+        "compaction_keep_recent_tokens": {
+          "type": "integer",
+          "description": "Estimated tokens of the newest conversation kept word for word after a summary; only older messages are summarized. Capped at a quarter of the window",
+          "default": 20000,
+          "examples": [
+            40000
+          ]
         }
       },
       "additionalProperties": false,

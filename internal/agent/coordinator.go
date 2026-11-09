@@ -172,10 +172,18 @@ type coordinator struct {
 	mainAgentName string
 	agents        map[string]SessionAgent
 
-	// Skills discovery results (session-start snapshot).
-	allSkills    []*skills.Skill // Pre-filter: all discovered after dedup.
-	activeSkills []*skills.Skill // Post-filter: active skills only.
-	skillTracker *skills.Tracker
+	// Skills discovery results (session-start snapshot). activeSkills
+	// follows the effective disabled set (config plus repository overrides):
+	// syncDisabledSkills refilters it,
+	// under skillsMu, when the list changes between turns.
+	allSkills      []*skills.Skill // Pre-filter: all discovered after dedup.
+	activeSkills   []*skills.Skill // Post-filter: active skills only.
+	skillTracker   *skills.Tracker
+	skillsMu       sync.Mutex
+	disabledSkills string // disabledSkillsKey of the list activeSkills reflects.
+	// prompts holds the main agents' prompt templates by agent name, so
+	// their system prompts can be rebuilt when the skill list changes.
+	prompts map[string]*prompt.Prompt
 
 	// mc is the Magic Context engine shared by the main agents (nil when
 	// Magic Context is off). syncMagicContext swaps it when the setting
@@ -247,7 +255,9 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		interactive:  opts.Interactive,
 		control:      opts.Control,
 		mcDB:         opts.DB,
+		prompts:      make(map[string]*prompt.Prompt),
 	}
+	c.disabledSkills = disabledSkillsKey(opts.Config.EffectiveDisabledSkills())
 
 	c.syncMagicContext(ctx)
 
@@ -266,6 +276,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		return nil, err
 	}
 	c.agents[config.AgentCoder] = agent
+	c.prompts[config.AgentCoder] = coderPrompt
 
 	planCfg, ok := c.cfg.Config().Agents[config.AgentPlan]
 	if !ok {
@@ -282,6 +293,7 @@ func NewCoordinator(ctx context.Context, opts CoordinatorOptions) (Coordinator, 
 		return nil, err
 	}
 	c.agents[config.AgentPlan] = planAgent
+	c.prompts[config.AgentPlan] = planSystemPrompt
 
 	c.mainAgent = agent
 	c.mainAgentName = config.AgentCoder
@@ -362,6 +374,9 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 	// its model settings, and the model refresh below must all target the
 	// same agent even if SetMainAgent swaps the main agent mid-flight.
 	agent, agentName := c.activeAgent()
+	if err := c.syncDisabledSkills(ctx); err != nil {
+		return nil, fmt.Errorf("failed to apply skill changes: %w", err)
+	}
 	if err := c.updateAgentModels(ctx, agent, agentName); err != nil {
 		return nil, fmt.Errorf("failed to update models: %w", err)
 	}
@@ -378,6 +393,7 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 	}
 
 	mergedOptions, temp, topP, topK, freqPenalty, presPenalty := mergeCallOptions(model, providerCfg)
+	mergedOptions = withPromptCacheKey(mergedOptions, providerCfg, sessionID)
 
 	if err := c.refreshTokenIfExpired(ctx, providerCfg); err != nil {
 		// NOTE(@andreynering): We don't return here because the event handling to ask the user to reauthenticate
@@ -430,11 +446,14 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 			OnComplete:        onComplete,
 			Accepted:          accept,
 			OnAuthRefresh:     c.makeAuthRefreshCallback(providerCfg),
+			// Pin the model the options above were derived from; a
+			// queued prompt keeps the model selected when it was sent.
+			Model: &model,
 		})
 	}
 	beforeLoaded := c.skillTracker.LoadedNames()
 	result, originalErr := run()
-	logTurnSkillUsage(sessionID, prompt, c.activeSkills, c.skillTracker, beforeLoaded)
+	logTurnSkillUsage(sessionID, prompt, c.currentActiveSkills(), c.skillTracker, beforeLoaded)
 	if originalErr == nil && c.interactive {
 		// Re-run the mission's open checks so the cockpit shows what this
 		// turn fixed without the agent having to ask.
@@ -561,6 +580,11 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 		_, hasReasoningEffort := mergedOptions["reasoning_effort"]
 		if !hasReasoningEffort && shouldSetEffort {
 			mergedOptions["reasoning_effort"] = reasoningEffort
+		}
+		// Ta-Da resends the full history every turn, so OpenAI has no
+		// reason to keep a copy of each response.
+		if _, hasStore := mergedOptions["store"]; !hasStore && officialOpenAIEndpoint(providerCfg) {
+			mergedOptions["store"] = false
 		}
 		if openai.IsResponsesModel(model.CatwalkCfg.ID) {
 			if openai.IsResponsesReasoningModel(model.CatwalkCfg.ID) {
@@ -796,6 +820,56 @@ func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.
 	return options
 }
 
+// officialOpenAIEndpoint reports whether an openai provider talks to
+// OpenAI's own API, which accepts store and prompt_cache_key. A custom base
+// URL may be a compatible server that rejects unknown fields. Azure is
+// excluded: older api-versions, custom Azure base URLs and Foundry
+// deployments of non-OpenAI models can fail with "Unrecognized request
+// argument". Azure users can still set store or prompt_cache_key through
+// the provider options.
+func officialOpenAIEndpoint(cfg config.ProviderConfig) bool {
+	if cfg.Type != openai.Name {
+		return false
+	}
+	return cfg.BaseURL == "" || strings.Contains(cfg.BaseURL, "api.openai.com")
+}
+
+// openAIPromptCacheKeyMaxLen is the longest prompt_cache_key OpenAI accepts.
+const openAIPromptCacheKeyMaxLen = 64
+
+// withPromptCacheKey returns opts with the session id as the OpenAI prompt
+// cache key, so every request of a session routes to the same cache. It
+// copies the OpenAI options rather than changing them in place, and keeps
+// a key the user configured.
+func withPromptCacheKey(opts fantasy.ProviderOptions, cfg config.ProviderConfig, sessionID string) fantasy.ProviderOptions {
+	if sessionID == "" || !officialOpenAIEndpoint(cfg) {
+		return opts
+	}
+	key := sessionID
+	if len(key) > openAIPromptCacheKeyMaxLen {
+		key = key[:openAIPromptCacheKeyMaxLen]
+	}
+	switch o := opts[openai.Name].(type) {
+	case *openai.ProviderOptions:
+		if o.PromptCacheKey != nil {
+			return opts
+		}
+		c := *o
+		c.PromptCacheKey = &key
+		opts = maps.Clone(opts)
+		opts[openai.Name] = &c
+	case *openai.ResponsesProviderOptions:
+		if o.PromptCacheKey != nil {
+			return opts
+		}
+		c := *o
+		c.PromptCacheKey = &key
+		opts = maps.Clone(opts)
+		opts[openai.Name] = &c
+	}
+	return opts
+}
+
 func mergeCallOptions(model Model, cfg config.ProviderConfig) (fantasy.ProviderOptions, *float64, *float64, *int64, *float64, *float64) {
 	modelOptions := getProviderOptions(model, cfg)
 	temp := cmp.Or(model.ModelCfg.Temperature, model.CatwalkCfg.Options.Temperature)
@@ -906,16 +980,67 @@ func (c *coordinator) promptForDir(p *prompt.Prompt, large Model, isSubAgent boo
 	return func(ctx context.Context, dir string) (string, error) {
 		mu.Lock()
 		defer mu.Unlock()
-		if s, ok := cache[dir]; ok {
+		// The skill list is part of the key so a skill toggled on or
+		// off reaches tabs in other folders too.
+		key := dir + "\x00" + disabledSkillsKey(c.cfg.EffectiveDisabledSkills())
+		if s, ok := cache[key]; ok {
 			return s, nil
 		}
 		s, err := c.buildSystemPrompt(ctx, p.InDir(dir), large, isSubAgent, false)
 		if err != nil {
 			return "", err
 		}
-		cache[dir] = s
+		cache[key] = s
 		return s, nil
 	}
+}
+
+// currentActiveSkills returns the active skills as of the last
+// syncDisabledSkills.
+func (c *coordinator) currentActiveSkills() []*skills.Skill {
+	c.skillsMu.Lock()
+	defer c.skillsMu.Unlock()
+	return c.activeSkills
+}
+
+// syncDisabledSkills applies a change to the effective disabled skills made since
+// the last turn (for example from the Toggle Skills dialog): it refilters
+// the active skills, updates the tracker, and rebuilds the main agents'
+// system prompts, so the next turn sees the change without a restart.
+// Sub-agents and tab folder prompts are rebuilt from the config on their
+// own. It does nothing when the list is unchanged.
+func (c *coordinator) syncDisabledSkills(ctx context.Context) error {
+	disabled := c.cfg.EffectiveDisabledSkills()
+	key := disabledSkillsKey(disabled)
+	c.skillsMu.Lock()
+	defer c.skillsMu.Unlock()
+	if key == c.disabledSkills {
+		return nil
+	}
+	for name, p := range c.prompts {
+		agent, ok := c.agents[name]
+		if !ok {
+			continue
+		}
+		systemPrompt, err := c.buildSystemPrompt(ctx, p, agent.Model(), false, false)
+		if err != nil {
+			return err
+		}
+		agent.SetSystemPrompt(systemPrompt)
+	}
+	c.activeSkills = skills.Filter(c.allSkills, disabled)
+	c.skillTracker.SetActive(c.activeSkills)
+	c.disabledSkills = key
+	slog.Info("Applied disabled skills change", "disabled", disabled, "active", len(c.activeSkills))
+	return nil
+}
+
+// disabledSkillsKey returns an order-independent key for a disabled_skills
+// list.
+func disabledSkillsKey(names []string) string {
+	sorted := slices.Clone(names)
+	slices.Sort(sorted)
+	return strings.Join(slices.Compact(sorted), "\x00")
 }
 
 func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubAgent bool) ([]fantasy.AgentTool, error) {
@@ -959,7 +1084,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	allTools = append(
 		allTools,
 		tools.NewBashTool(c.permissions, c.history, c.cfg.WorkingDir(), c.cfg.Config().Options.DataDirectory, c.cfg.Config().Options.Attribution, modelID, sandbox.Settings{Mode: c.cfg.Config().Options.Sandbox, Network: c.cfg.Config().Options.SandboxNetwork}),
-		tools.NewCrushInfoTool(c.cfg, c.lspManager, c.allSkills, c.activeSkills, c.skillTracker),
+		tools.NewCrushInfoTool(c.cfg, c.lspManager, c.allSkills, c.currentActiveSkills(), c.skillTracker),
 		tools.NewCrushLogsTool(logFile),
 		tools.NewJobOutputTool(c.cfg.Config().Options.DataDirectory),
 		tools.NewJobKillTool(),
@@ -1027,7 +1152,16 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		}
 	}
 
+	cfg := c.cfg.Config()
+	leanHidden := map[string]bool{}
 	for _, tool := range tools.GetMCPTools(c.permissions, c.cfg, c.cfg.WorkingDir()) {
+		if !cfg.LeanMCPToolAllowed(tool.Name(), tool.MCP()) {
+			if !leanHidden[tool.MCP()] {
+				leanHidden[tool.MCP()] = true
+				slog.Debug("Lean tool profile hides MCP server tools", "mcp", tool.MCP(), "agent", agent.Name)
+			}
+			continue
+		}
 		if agent.AllowedMCP == nil {
 			// No MCP restrictions
 			filteredTools = append(filteredTools, tool)
@@ -1748,7 +1882,7 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 			SessionID:        session.ID,
 			Prompt:           params.Prompt,
 			MaxOutputTokens:  maxTokens,
-			ProviderOptions:  getProviderOptions(model, providerCfg),
+			ProviderOptions:  withPromptCacheKey(getProviderOptions(model, providerCfg), providerCfg, session.ID),
 			Temperature:      model.ModelCfg.Temperature,
 			TopP:             model.ModelCfg.TopP,
 			TopK:             callTopK(providerCfg, model.ModelCfg.TopK),
@@ -1822,7 +1956,7 @@ func discoverSkills(cfg *config.ConfigStore) (allSkills, activeSkills []*skills.
 	var paths, disabled []string
 	if opts != nil {
 		paths = opts.SkillsPaths
-		disabled = opts.DisabledSkills
+		disabled = cfg.EffectiveDisabledSkills()
 	}
 	var resolver func(string) (string, error)
 	if r := cfg.Resolver(); r != nil {
@@ -2003,13 +2137,32 @@ func (c *coordinator) claudeCodeArgs(isSubAgent bool) func(sessionID string) []s
 			}
 			servers["tada-mission"] = stdioServer(exe, args...)
 		}
-		// Always served to the main agent, so it can save machines the
-		// user describes even before any exist.
-		if !isSubAgent {
+		// Served to the main agent only when machines are configured or
+		// options.enabled_tools lists machines, like the native tool.
+		if !isSubAgent && c.machinesToolEnabled() {
 			servers[fleet.MCPServerName] = stdioServer(exe, "machines", "mcp", "--dir", c.cfg.WorkingDir())
 		}
-		return mcpConfigArgs(servers)
+		if o := c.cfg.Config().Options; o == nil || !o.ClaudeCodeStrictMCP {
+			return mcpConfigArgs(servers)
+		}
+		// Strict mode ignores the MCP servers in the user's Claude Code
+		// settings, so pass an explicit (possibly empty) set.
+		cfg, err := json.Marshal(map[string]any{"mcpServers": servers})
+		if err != nil {
+			return nil
+		}
+		return []string{"--strict-mcp-config", "--mcp-config=" + string(cfg)}
 	}
+}
+
+// machinesToolEnabled reports whether the machines tools are offered:
+// when any machine is configured or options.enabled_tools lists machines.
+func (c *coordinator) machinesToolEnabled() bool {
+	cfg := c.cfg.Config()
+	if len(cfg.Machines) > 0 {
+		return true
+	}
+	return cfg.Options != nil && slices.Contains(cfg.Options.EnabledTools, "machines")
 }
 
 // artifactService returns the artifacts service configured from

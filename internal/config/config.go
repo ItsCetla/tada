@@ -595,6 +595,7 @@ type Options struct {
 	// verbatim. After defaulting the stored value is always absolute.
 	DataDirectory             string           `json:"data_directory,omitempty" jsonschema:"description=Directory for storing application data. Relative paths are resolved against the working directory; absolute paths are used as-is.,default=.tada,example=.tada"`
 	DisabledTools             []string         `json:"disabled_tools,omitempty" jsonschema:"description=List of built-in tools to disable and hide from the agent,example=bash,example=sourcegraph"`
+	EnabledTools              []string         `json:"enabled_tools,omitempty" jsonschema:"description=Built-in tools that are off by default to turn on for the agent: artifact\\, artifact_data\\, artifact_comments and machines. machines is also on whenever machines are configured,example=artifact,example=machines"`
 	DisableProviderAutoUpdate bool             `json:"disable_provider_auto_update,omitempty" jsonschema:"description=Deprecated: has no effect. The provider catalog is never updated automatically; run tada update-providers to update it."`
 	DisableDefaultProviders   bool             `json:"disable_default_providers,omitempty" jsonschema:"description=Ignore all default/embedded providers. When enabled\\, providers must be fully specified in the config file with base_url\\, models\\, and api_key - no merging with defaults occurs,default=false"`
 	Attribution               *Attribution     `json:"attribution,omitempty" jsonschema:"description=Attribution settings for generated content"`
@@ -625,12 +626,82 @@ type Options struct {
 	Sandbox string `json:"sandbox,omitempty" jsonschema:"description=Sandbox for agent shell commands (macOS only). workspace-write lets commands change only the project\\, temp and build caches; read-only lets them change only temp. Commands that stay in the sandbox with the network off run without asking,enum=off,enum=read-only,enum=workspace-write,default=off"`
 	// SandboxNetwork lets sandboxed shell commands use the network.
 	SandboxNetwork bool `json:"sandbox_network,omitempty" jsonschema:"description=Let sandboxed shell commands use the network. When on\\, commands ask for permission as usual,default=false"`
+	// ClaudeCodeStrictMCP runs the Claude Code engine with
+	// --strict-mcp-config, so only Ta-Da's own MCP servers load.
+	ClaudeCodeStrictMCP bool `json:"claude_code_strict_mcp,omitempty" jsonschema:"description=Run the Claude Code engine with --strict-mcp-config so it loads only Ta-Da's own MCP servers and ignores the MCP servers from your Claude Code settings. Faster turns and fewer tool tokens; your claude.ai connectors and global MCP servers are then unavailable inside Ta-Da,default=false"`
+	// ToolProfile picks the built-in tool set. "lean" keeps only
+	// leanTools plus anything listed in EnabledTools.
+	ToolProfile string `json:"tool_profile,omitempty" jsonschema:"description=Built-in tool set for the agents. lean keeps only the core tools (agent\\, bash\\, edit\\, multiedit\\, view\\, write\\, grep\\, glob\\, ls and question); list tools in enabled_tools to add individual ones back. lean also hides MCP server tools unless enabled_tools lists the tool name (mcp_<server>_<tool>) or mcp_<server>,enum=full,enum=lean,default=full"`
+	// CompactionReserveTokens is the free context the agent keeps before
+	// it summarizes the conversation. 0 means the default.
+	CompactionReserveTokens int `json:"compaction_reserve_tokens,omitempty" jsonschema:"description=Tokens to keep free in the context window. The conversation is summarized once the prompt grows past the window minus this reserve (and the reply limit). Capped at half the window,default=16384,example=32768"`
+	// CompactionKeepRecentTokens is how much of the newest conversation a
+	// summary keeps verbatim. 0 means the default.
+	CompactionKeepRecentTokens int `json:"compaction_keep_recent_tokens,omitempty" jsonschema:"description=Estimated tokens of the newest conversation kept word for word after a summary; only older messages are summarized. Capped at a quarter of the window,default=20000,example=40000"`
+}
+
+// ToolProfileLean is the tool_profile value that trims the built-in tools
+// down to leanTools.
+const ToolProfileLean = "lean"
+
+// leanTools are the built-in tools kept by the lean tool profile.
+var leanTools = []string{"agent", "bash", "edit", "multiedit", "view", "write", "grep", "glob", "ls", "question"}
+
+// leanToolsDisabled returns the built-in tools the lean profile turns off:
+// everything outside leanTools that options.enabled_tools doesn't name.
+func (c *Config) leanToolsDisabled() []string {
+	if c.Options == nil || c.Options.ToolProfile != ToolProfileLean {
+		return nil
+	}
+	var off []string
+	for _, name := range allToolNames() {
+		if slices.Contains(leanTools, name) || slices.Contains(c.Options.EnabledTools, name) {
+			continue
+		}
+		off = append(off, name)
+	}
+	return off
+}
+
+// LeanMCPToolAllowed reports whether the MCP tool toolName (the full
+// mcp_<server>_<tool> name) from server may be offered under the current
+// tool profile. Outside the lean profile every MCP tool is allowed; in lean,
+// only tools whose full name or mcp_<server> is in options.enabled_tools.
+func (c *Config) LeanMCPToolAllowed(toolName, server string) bool {
+	if c.Options == nil || c.Options.ToolProfile != ToolProfileLean {
+		return true
+	}
+	return slices.Contains(c.Options.EnabledTools, toolName) ||
+		slices.Contains(c.Options.EnabledTools, "mcp_"+server)
 }
 
 // webTools are the built-in tools that make outbound network requests on
 // the agent's behalf. They are hidden from every agent unless web tools are
 // enabled.
 var webTools = []string{"agentic_fetch", "download", "fetch", "sourcegraph"}
+
+// optInTools are built-in tools hidden from every agent unless listed in
+// options.enabled_tools. Their schemas are large and most sessions don't use
+// them, so they aren't sent by default.
+var optInTools = []string{"artifact", "artifact_data", "artifact_comments", "machines"}
+
+// optInToolsDisabled returns the opt-in tools that stay off: those not in
+// options.enabled_tools. machines is on whenever machines are configured,
+// since the system prompt then tells the agent to use it.
+func (c *Config) optInToolsDisabled() []string {
+	var enabled []string
+	if c.Options != nil {
+		enabled = c.Options.EnabledTools
+	}
+	var off []string
+	for _, name := range optInTools {
+		if slices.Contains(enabled, name) || (name == "machines" && len(c.Machines) > 0) {
+			continue
+		}
+		off = append(off, name)
+	}
+	return off
+}
 
 // WebToolsEnabled reports whether the web tools are available to agents.
 // TADA_ENABLE_WEB_TOOLS takes precedence over options.enable_web_tools
@@ -1318,9 +1389,10 @@ func filterSlice(data []string, mask []string, include bool) []string {
 }
 
 func (c *Config) SetupAgents() {
-	disabledTools := c.Options.DisabledTools
+	disabledTools := append(slices.Clone(c.Options.DisabledTools), c.optInToolsDisabled()...)
+	disabledTools = append(disabledTools, c.leanToolsDisabled()...)
 	if !c.Options.WebToolsEnabled() {
-		disabledTools = append(slices.Clone(disabledTools), webTools...)
+		disabledTools = append(disabledTools, webTools...)
 	}
 	allowedTools := resolveAllowedTools(allToolNames(), disabledTools)
 
