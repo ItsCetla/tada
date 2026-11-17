@@ -7,6 +7,15 @@ listed; see the [upstream releases](https://github.com/charmbracelet/crush/relea
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-17
+
+### Security
+
+- **Built with Go 1.27.4**, which fixes an HTTP/1 server crash from a
+  `MaxBytesReader` header race in `net/http`
+  ([GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859)). 0.7.0 was built
+  with Go 1.27.3; update with `tada update`.
+
 ## [0.7.0] - 2026-11-17
 
 ### Added
