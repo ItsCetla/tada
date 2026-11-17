@@ -972,6 +972,21 @@ func TestConfig_LeanMCPToolAllowed(t *testing.T) {
 	require.False(t, lean.LeanMCPToolAllowed("mcp_github_list_issues", "github"))
 }
 
+func TestConfig_LeanToolKept(t *testing.T) {
+	t.Parallel()
+
+	// LeanToolKept answers for the lean profile whatever profile is set,
+	// so an automatic switch to lean can use it.
+	cfg := &Config{Options: &Options{EnabledTools: []string{"todos", "mcp_docs"}}}
+	require.True(t, cfg.LeanToolKept("bash", ""))
+	require.True(t, cfg.LeanToolKept("todos", ""))
+	require.False(t, cfg.LeanToolKept("sourcegraph", ""))
+	require.True(t, cfg.LeanToolKept("ctx_search", ""))
+	require.True(t, cfg.LeanToolKept("mcp_docs_search", "docs"))
+	require.False(t, cfg.LeanToolKept("mcp_github_list_issues", "github"))
+	require.True(t, (&Config{}).LeanToolKept("bash", ""))
+}
+
 func TestConfig_setupAgentsWebToolsOptIn(t *testing.T) {
 	webTools := []string{"fetch", "agentic_fetch", "download", "sourcegraph"}
 	assertNoWebTools := func(t *testing.T, cfg *Config) {

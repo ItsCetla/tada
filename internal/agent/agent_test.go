@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/session"
+	"github.com/charmbracelet/crush/internal/snapshot"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -48,10 +49,16 @@ func setupAgent(t *testing.T, pair modelPair) (SessionAgent, fakeEnv) {
 	r := vcr.NewRecorder(t)
 	large, small := getModels(t, r, pair)
 	env := testEnv(t)
+	// Let shell snapshot indexing finish before the working dir is
+	// removed, or the next run of the same test can't snapshot it.
+	t.Cleanup(snapshot.Idle)
 
 	createSimpleGoProject(t, env.workingDir)
 	agent, err := coderAgent(r, env, large, small)
 	require.NoError(t, err)
+	// Title generation runs in the background; wait for it so it never
+	// hits the recorder after the test has finished.
+	t.Cleanup(agent.(*sessionAgent).titleWG.Wait)
 	return agent, env
 }
 

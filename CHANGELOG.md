@@ -7,6 +7,8 @@ listed; see the [upstream releases](https://github.com/charmbracelet/crush/relea
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-17
+
 ### Added
 
 - **Sandbox for shell commands on macOS.** `option sandbox
@@ -48,6 +50,26 @@ listed; see the [upstream releases](https://github.com/charmbracelet/crush/relea
 - **Breaking: `~/.claude/skills` is no longer loaded by default.** Add
   `option skill-path ~/.claude/skills` to `tadarc` to keep using those
   skills.
+
+### Fixed
+
+- **Summaries no longer fill the screen.** A finished compaction summary
+  shows as one collapsed line, `Context summarized … (N lines hidden)`;
+  click it or press space to expand it.
+- **Small context windows summarize in time.** Once free space drops to
+  the reply budget, Ta-Da summarizes even when the history looks short, so
+  local models with 32K-64K windows stop overflowing or being truncated.
+- **Big tool sets switch to the lean profile on their own.** When the
+  system prompt and tools would take more than half the model's window and
+  `tool-profile` is unset, the session starts lean. The choice is kept for
+  the whole session and never changes after the first reply.
+- **Replies that are only JSON render as a code block** instead of a raw
+  blob.
+- **Session titles work on local reasoning models.** If the model spends
+  the whole title budget thinking, Ta-Da retries once with more room
+  instead of logging an error and leaving the session untitled.
+- **Rewind recovers if its snapshot folder is deleted** mid-session,
+  instead of skipping every later command until restart.
 
 ## [0.6.2] - 2026-10-23
 

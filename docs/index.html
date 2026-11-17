@@ -107,7 +107,7 @@
         <div class="cards">
           <article class="card">
             <h3><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12h8M12 8v8"/></svg></span>A lean tool profile</h3>
-            <p>The model gets a small core of tools instead of everything at once. <code>option tool-profile lean</code> trims the built-ins and hides MCP tools; <code>option enable-tool &lt;name&gt;</code> adds a single tool or a whole MCP server back. Artifact tools are now opt-in with <code>option enable-tool artifact</code> (plus <code>artifact_data</code> and <code>artifact_comments</code>); <code>machines</code> stays on whenever you have machines configured.</p>
+            <p>The model gets a small core of tools instead of everything at once. <code>option tool-profile lean</code> trims the built-ins and hides MCP tools; <code>option enable-tool &lt;name&gt;</code> adds a single tool or a whole MCP server back. Artifact tools are now opt-in with <code>option enable-tool artifact</code> (plus <code>artifact_data</code> and <code>artifact_comments</code>); <code>machines</code> stays on whenever you have machines configured. If you leave the profile unset and the prompt plus tools would fill more than half the model's window, the session starts lean on its own.</p>
           </article>
           <article class="card">
             <h3><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 12h10M4 17h7"/><circle cx="18" cy="16" r="3"/></svg></span>A smaller, stable prompt</h3>
@@ -223,7 +223,7 @@
           </article>
           <article class="card">
             <h3><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h5"/><path d="m15 16 2 2 3-3"/></svg></span>Long chats keep going</h3>
-            <p>When a conversation outgrows the model's context window, Ta-Da summarizes it and sends the request again instead of stopping with an error, and summarizes again if a long task fills the window a second time. Auto-summarize leaves room for the reply, and models without a published window, including ones behind a LiteLLM proxy, learn theirs from the first overflow.</p>
+            <p>When a conversation outgrows the model's context window, Ta-Da summarizes it and sends the request again instead of stopping with an error, and summarizes again if a long task fills the window a second time. Auto-summarize leaves room for the reply, and models without a published window, including ones behind a LiteLLM proxy, learn theirs from the first overflow. On small local windows it summarizes before the reply budget runs out, and the finished summary folds into one line you can click open.</p>
           </article>
           <article class="card">
             <h3><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5M12 8v5l3 2"/></svg></span>Updates when you say so</h3>

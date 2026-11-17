@@ -229,6 +229,9 @@ type sessionAgent struct {
 	tools              *csync.Slice[fantasy.AgentTool]
 
 	isSubAgent bool
+	// titleWG tracks background title generation so tests can wait for
+	// it before their recorder closes.
+	titleWG sync.WaitGroup
 	// enforceBudget makes a sub-agent stop at the budget like the main
 	// agent does. Swarm agents set it; other sub-agents run under a parent
 	// whose own steps check the budget.
@@ -279,6 +282,12 @@ type sessionAgent struct {
 	// an overflow error reported, for models the catalog lists without
 	// one. Values are int64.
 	learnedWindows sync.Map
+	// autoLeanLogged records, per provider/model, that the switch to the
+	// lean tool profile was logged.
+	autoLeanLogged sync.Map
+	// leanSessions holds, per session ID, whether the session runs with
+	// the automatic lean tool profile. Values are bool.
+	leanSessions sync.Map
 	// dispatchMuCreate guards lazy creation of per-session entries in
 	// dispatchMu so two goroutines can't race to lock different mutex
 	// instances for the same session.
@@ -888,6 +897,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		}
 	}
 
+	autoLean := a.autoLean(ctx, call.SessionID, largeModel, systemPrompt, agentTools)
+	if autoLean {
+		agentTools = leanToolSet(a.cfg.Config(), agentTools)
+	}
+
 	if len(agentTools) > 0 {
 		// Add Anthropic caching to the last tool.
 		agentTools[len(agentTools)-1].SetProviderOptions(a.getCacheControlOptions())
@@ -922,9 +936,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	if !hasUserTextMessage(msgs) && !a.isSubAgent {
 		titleCtx := context.WithoutCancel(ctx)
 		if IsHeadless(ctx) {
-			go a.titleFromPrompt(titleCtx, call.SessionID, call.Prompt)
+			a.titleWG.Go(func() { a.titleFromPrompt(titleCtx, call.SessionID, call.Prompt) })
 		} else {
-			go a.GenerateTitle(titleCtx, call.SessionID, call.Prompt)
+			a.titleWG.Go(func() { a.GenerateTitle(titleCtx, call.SessionID, call.Prompt) })
 		}
 	}
 
@@ -1017,6 +1031,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				callContext,
 				filterToolsForChannel(a.tools.Copy(), call.Channel, mcp.GetStates()),
 			)
+			if autoLean {
+				prepared.Tools = leanToolSet(a.cfg.Config(), prepared.Tools)
+			}
 
 			// Drain queued follow-up prompts for this step. Calls covered
 			// by a cancel recorded while they sat in the queue are dropped:
@@ -1299,10 +1316,17 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				// when it reports more (a provider that accepted an
 				// oversized prompt without complaint).
 				tokens := max(currentSession.CompletionTokens+currentSession.PromptTokens, lastPrompt)
-				if cw-tokens <= threshold {
+				if cw-tokens > threshold {
+					return false
+				}
+				history := conversationTokens(stepMessages, steps)
+				if shouldAutoSummarize(cw, tokens, threshold, replyBudget(call.MaxOutputTokens, reserve), history) {
 					shouldSummarize = true
 					return true
 				}
+				slog.Debug("Skipping auto-summarize, little history to summarize",
+					"session_id", call.SessionID, "history_tokens", history,
+					"prompt_tokens", tokens, "context_window", cw)
 				return false
 			},
 			func(steps []fantasy.StepResult) bool {
@@ -2360,6 +2384,19 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		}
 		agent := newAgent(attempt.model.Model, titlePrompt, tok)
 		resp, err = agent.Stream(ctx, streamCall)
+		if err == nil && !attempt.model.CatwalkCfg.CanReason && thoughtWithoutAnswer(resp) {
+			// The model reasons even though its config doesn't say so
+			// (common for local servers), and the thinking used up the
+			// short budget before any title. Give it room to finish, but
+			// never more than the user's own max_tokens.
+			tok = max(attempt.model.CatwalkCfg.DefaultMaxTokens, titleReasoningTokens)
+			if attempt.model.ModelCfg.MaxTokens > 0 {
+				tok = attempt.model.ModelCfg.MaxTokens
+			}
+			slog.Debug("Title model reasoned past its budget; retrying with more room", "model", attempt.name, "max_tokens", tok)
+			agent = newAgent(attempt.model.Model, titlePrompt, tok)
+			resp, err = agent.Stream(ctx, streamCall)
+		}
 		if err == nil && resp.Response.FinishReason != fantasy.FinishReasonLength {
 			model = attempt.model
 			slog.Debug("Generated title with " + attempt.name + " model")
@@ -2369,7 +2406,7 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		if err != nil {
 			slog.Error("Error generating title with "+attempt.name+" model; trying next", "err", err)
 		} else {
-			slog.Error("Title generation hit token limit with " + attempt.name + " model; trying next")
+			slog.Warn("Title generation hit token limit with " + attempt.name + " model; trying next")
 		}
 	}
 	if !success {
@@ -2435,6 +2472,27 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		return
 	}
 	titleSaved = true
+}
+
+// titleReasoningTokens is the least output budget a title request gets
+// once the model has shown it thinks before answering.
+const titleReasoningTokens int64 = 2048
+
+// thoughtWithoutAnswer reports whether a response ran out of tokens while
+// the model was still thinking: reasoning (as a reasoning part or an
+// inline <think> block) but no title text after it.
+func thoughtWithoutAnswer(resp *fantasy.AgentResult) bool {
+	if resp == nil || resp.Response.FinishReason != fantasy.FinishReasonLength {
+		return false
+	}
+	text := resp.Response.Content.Text()
+	reasoned := strings.TrimSpace(resp.Response.Content.ReasoningText()) != "" ||
+		strings.Contains(text, "<think>")
+	text = thinkTagRegex.ReplaceAllString(text, "")
+	if i := strings.Index(text, "<think>"); i >= 0 {
+		text = text[:i]
+	}
+	return reasoned && strings.TrimSpace(orphanThinkTagRegex.ReplaceAllString(text, "")) == ""
 }
 
 func (a *sessionAgent) openrouterCost(metadata fantasy.ProviderMetadata) *float64 {

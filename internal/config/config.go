@@ -655,10 +655,9 @@ func (c *Config) leanToolsDisabled() []string {
 	}
 	var off []string
 	for _, name := range allToolNames() {
-		if slices.Contains(leanTools, name) || slices.Contains(c.Options.EnabledTools, name) {
-			continue
+		if !c.LeanToolKept(name, "") {
+			off = append(off, name)
 		}
-		off = append(off, name)
 	}
 	return off
 }
@@ -671,8 +670,26 @@ func (c *Config) LeanMCPToolAllowed(toolName, server string) bool {
 	if c.Options == nil || c.Options.ToolProfile != ToolProfileLean {
 		return true
 	}
-	return slices.Contains(c.Options.EnabledTools, toolName) ||
-		slices.Contains(c.Options.EnabledTools, "mcp_"+server)
+	return c.LeanToolKept(toolName, server)
+}
+
+// LeanToolKept reports whether the lean tool profile keeps the tool name,
+// whatever profile is set. server is the tool's MCP server, or "" for a
+// built-in tool. Built-in tools are kept when they are in leanTools, MCP
+// tools when options.enabled_tools names the tool or mcp_<server>, and
+// anything else (such as the Magic Context tools) is always kept.
+func (c *Config) LeanToolKept(name, server string) bool {
+	var enabled []string
+	if c.Options != nil {
+		enabled = c.Options.EnabledTools
+	}
+	if slices.Contains(enabled, name) {
+		return true
+	}
+	if server != "" {
+		return slices.Contains(enabled, "mcp_"+server)
+	}
+	return slices.Contains(leanTools, name) || !slices.Contains(allToolNames(), name)
 }
 
 // webTools are the built-in tools that make outbound network requests on

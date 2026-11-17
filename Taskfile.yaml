@@ -91,6 +91,11 @@ tasks:
       - rm -r internal/agent/testdata
       - go test -v -count=1 -timeout=1h ./internal/agent
 
+  e2e:local:
+    desc: Drive the TUI on a local model to build a Go package, then verify it (TADA_E2E_MACHINE, default pc)
+    cmds:
+      - ./scripts/e2e-local.sh
+
   fmt:
     desc: Run gofumpt
     cmds:

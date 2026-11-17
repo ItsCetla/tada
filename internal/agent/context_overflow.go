@@ -351,6 +351,58 @@ func summarizeThreshold(contextWindow, maxOutputTokens, reserve int64) int64 {
 	return min(max(reserve, 0)+max(maxOutputTokens, 0), contextWindow/2)
 }
 
+// summarizeFreesSpace reports whether summarizing historyTokens of
+// conversation (everything since the last summary, without the system
+// prompt and tool definitions) would give back a meaningful part of the
+// window. A summary replaces the history with about summaryTokenEstimate
+// tokens and can't shrink the system prompt or tools, so on a small
+// window where those alone come close to the threshold, the first turn
+// trips it with nothing worth summarizing, and every turn after a summary
+// would trip it again. Requiring the summary to free at least a quarter
+// of the window (the headroom compactionKeepBudget aims for) skips those.
+func summarizeFreesSpace(contextWindow, historyTokens int64) bool {
+	return historyTokens-summaryTokenEstimate >= contextWindow/4
+}
+
+// replyBudget is the room the next reply needs: the request's max_tokens,
+// or the reserve when the request sets none.
+func replyBudget(maxOutputTokens, reserve int64) int64 {
+	if maxOutputTokens > 0 {
+		return maxOutputTokens
+	}
+	return max(reserve, 0)
+}
+
+// shouldAutoSummarize reports whether a step that left tokens of a
+// contextWindow in use should summarize. It does once the free space is
+// down to threshold, unless summarizeFreesSpace says the history is too
+// small to be worth it. That skip only holds while a full reply
+// (replyTokens) still fits: past that the next request would overflow or,
+// on providers that truncate silently, lose context, so the history is
+// summarized whatever its size.
+func shouldAutoSummarize(contextWindow, tokens, threshold, replyTokens, historyTokens int64) bool {
+	free := contextWindow - tokens
+	if free > threshold {
+		return false
+	}
+	return free <= replyTokens || summarizeFreesSpace(contextWindow, historyTokens)
+}
+
+// conversationTokens estimates the conversation in the last step: its
+// prompt without the system messages, plus what the step added.
+func conversationTokens(prompt []fantasy.Message, steps []fantasy.StepResult) int64 {
+	var tokens int64
+	for _, msg := range prompt {
+		if msg.Role != fantasy.MessageRoleSystem {
+			tokens += estimateMessageTokens([]fantasy.Message{msg})
+		}
+	}
+	if len(steps) > 0 {
+		tokens += estimateMessageTokens(steps[len(steps)-1].Messages)
+	}
+	return tokens
+}
+
 // compactionKeepRecent caps the verbatim tail at a quarter of the window,
 // so the tail and its summary fit well below the summarize threshold.
 func compactionKeepRecent(keepRecent, contextWindow int64) int64 {

@@ -1,8 +1,10 @@
 package chat
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"strings"
@@ -183,6 +185,16 @@ type AssistantMessageItem struct {
 	anim              *anim.Anim
 	thinkingViewMode  thinkingViewMode
 	thinkingBoxHeight int // Tracks the rendered thinking box height for click detection.
+
+	// summaryExpanded shows the full body of a finished auto-compaction
+	// summary. Collapsed by default so the summary does not dump a wall
+	// of markdown into the chat.
+	summaryExpanded bool
+
+	// thinkingClicked records that the last handled click landed on the
+	// thinking box, so the ToggleExpanded call that follows it toggles
+	// the thinking block rather than the summary body.
+	thinkingClicked bool
 
 	// planAgent marks this item as plan-agent output. While the plan
 	// streams (the message is not finished) and the plan-start marker
@@ -525,6 +537,9 @@ func (a *AssistantMessageItem) contentKey() (uint64, uint64) {
 	if a.richReady() {
 		extra |= 2
 	}
+	if a.summaryCollapsed() {
+		extra |= 4
+	}
 	return fnv64(a.message.Content().Text), extra
 }
 
@@ -601,6 +616,8 @@ func (a *AssistantMessageItem) cachedContent(width int) string {
 	// ThinkingBox treatment.
 	var out string
 	switch {
+	case a.summaryCollapsed():
+		out = a.renderCollapsedSummary(text, width)
 	case common.PlanReadyMarkerPresent(text):
 		out = a.renderPlanCard(common.StripPlanMarkers(text), width)
 	case a.planStreaming() && common.PlanStartMarkerPresent(text):
@@ -611,7 +628,7 @@ func (a *AssistantMessageItem) cachedContent(width int) string {
 		// grow a border.
 		out = a.renderPlanCardStreaming(common.StripPlanMarkers(text), width)
 	default:
-		out = a.renderMarkdown(common.StripPlanMarkers(text), width)
+		out = a.renderMarkdown(jsonAsCodeBlock(common.StripPlanMarkers(text)), width)
 	}
 	a.contentSec.store(width, srcHash, extra, out, 0)
 	return out
@@ -782,6 +799,45 @@ func (a *AssistantMessageItem) renderMarkdown(content string, width int) string 
 	return a.streamingContent.Render(content, width, renderer)
 }
 
+// isCollapsibleSummary reports whether this item is a finished
+// auto-compaction summary with a body to fold away.
+func (a *AssistantMessageItem) isCollapsibleSummary() bool {
+	return a.message.IsSummaryMessage && a.message.IsFinished() &&
+		strings.TrimSpace(a.message.Content().Text) != ""
+}
+
+// summaryCollapsed reports whether the summary body is currently folded
+// into its one-line placeholder.
+func (a *AssistantMessageItem) summaryCollapsed() bool {
+	return a.isCollapsibleSummary() && !a.summaryExpanded
+}
+
+// renderCollapsedSummary renders a finished summary as a single muted
+// line that says how much is hidden and how to expand it.
+func (a *AssistantMessageItem) renderCollapsedSummary(text string, width int) string {
+	hidden := countLines(strings.TrimSpace(text))
+	line := styles.TextIcon + " Context summarized " +
+		fmt.Sprintf(assistantMessageTruncateFormat, hidden)
+	return a.sty.Messages.ThinkingTruncationHint.Render(ansi.Truncate(line, width, "…"))
+}
+
+// jsonAsCodeBlock wraps a reply that is nothing but a single JSON object
+// in a fenced json code block, pretty-printed. Weak models sometimes
+// write a tool call as plain text; this keeps it from rendering as a
+// loose blob. Any other text is returned unchanged.
+func jsonAsCodeBlock(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") ||
+		!json.Valid([]byte(trimmed)) {
+		return text
+	}
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, []byte(trimmed), "", "  "); err != nil {
+		return text
+	}
+	return "```json\n" + buf.String() + "\n```"
+}
+
 func (a *AssistantMessageItem) renderSpinning() string {
 	if a.message.IsThinking() {
 		a.anim.SetLabel("Thinking")
@@ -884,6 +940,15 @@ func (a *AssistantMessageItem) clearCache() {
 // there is nothing to expand, and mutating the view mode would
 // thrash the thinking-section cache key for no visible benefit.
 func (a *AssistantMessageItem) ToggleExpanded() bool {
+	// A finished summary folds its body instead of the thinking block,
+	// unless the click that triggered this landed on the thinking box.
+	thinkingClicked := a.thinkingClicked
+	a.thinkingClicked = false
+	if a.isCollapsibleSummary() && !thinkingClicked {
+		a.summaryExpanded = !a.summaryExpanded
+		a.Bump()
+		return a.summaryExpanded
+	}
 	if strings.TrimSpace(a.message.ReasoningContent().Thinking) == "" {
 		return a.thinkingViewMode != thinkingCollapsed
 	}
@@ -941,9 +1006,16 @@ func (a *AssistantMessageItem) HandleMouseClick(btn ansi.MouseButton, x, y int) 
 	if btn != ansi.MouseLeft {
 		return false
 	}
+	onThinking := a.thinkingBoxHeight > 0 && y < a.thinkingBoxHeight
+	a.thinkingClicked = onThinking
+	// A finished summary is clickable anywhere so it can be folded and
+	// unfolded; a click on its thinking box still toggles the thinking.
+	if a.isCollapsibleSummary() {
+		return true
+	}
 	// Only the thinking box is clickable; other regions of the assistant
 	// message should not trigger expansion.
-	return a.thinkingBoxHeight > 0 && y < a.thinkingBoxHeight
+	return onThinking
 }
 
 // HandleKeyEvent implements KeyEventHandler.

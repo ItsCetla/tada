@@ -963,8 +963,12 @@ func (s *store) init(ctx context.Context) error {
 	s.mu.Lock()
 	ready := s.ready
 	s.mu.Unlock()
+	// The repository can vanish under a cached store, as when its data
+	// folder is deleted, so ready only counts while HEAD is still there.
 	if ready {
-		return nil
+		if _, err := os.Stat(filepath.Join(s.gitDir, "HEAD")); err == nil {
+			return nil
+		}
 	}
 	// An empty global config and hooks folder of our own stand in for
 	// /dev/null, which Windows lacks.
