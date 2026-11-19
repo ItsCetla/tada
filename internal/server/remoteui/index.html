@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#16171a" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f6f6f4" media="(prefers-color-scheme: light)">
+<meta name="referrer" content="no-referrer">
+<title>Ta-Da Remote</title>
+<link rel="stylesheet" href="/style.css">
+<script type="module" src="/app.js"></script>
+</head>
+<body>
+<div id="app" class="app">
+  <aside id="sidebar" class="sidebar" aria-label="Sessions">
+    <div class="sidebar-head">
+      <button id="project-btn" class="project-btn" type="button" aria-haspopup="dialog">
+        <span class="project-label">Project</span>
+        <span id="project-name" class="project-name">...</span>
+      </button>
+      <button id="sidebar-close" class="icon-btn only-narrow" type="button" aria-label="Close sessions">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <button id="new-session" class="new-session" type="button">New session</button>
+    <ul id="session-list" class="session-list"></ul>
+    <div id="host-line" class="host-line"></div>
+  </aside>
+  <div id="scrim" class="scrim" hidden></div>
+
+  <main class="main">
+    <header class="topbar">
+      <button id="menu-btn" class="icon-btn only-narrow" type="button" aria-label="Sessions">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <span id="session-avatar" class="session-avatar"></span>
+      <div class="title-wrap">
+        <div id="session-title" class="session-title">Ta-Da</div>
+        <div id="session-sub" class="session-sub"></div>
+      </div>
+      <button id="auto-btn" class="auto-btn" type="button" aria-pressed="false" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path class="shackle" d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+        <span>Auto</span>
+      </button>
+      <div id="conn" class="conn" data-state="connecting" role="status" aria-live="polite">
+        <span class="conn-dot" aria-hidden="true"></span>
+        <span id="conn-text" class="conn-text">Connecting</span>
+      </div>
+    </header>
+
+    <div id="banner" class="banner" hidden></div>
+
+    <section id="scroller" class="scroller" aria-live="off">
+      <div id="empty" class="empty">
+        <span class="avatar avatar-lg avatar-brand" aria-hidden="true">✦</span>
+        <p class="empty-title">What should we work on?</p>
+        <p class="empty-text">Pick a session or type below to start a new one.</p>
+        <p class="suggest-label">Suggestions</p>
+        <div class="suggestions">
+          <button type="button" class="suggestion" data-prompt="Give me a tour of this codebase: what it does, how it's laid out, and where to start reading.">
+            <span class="sg-icon" style="--c:#3b82f6">?</span>
+            <span class="sg-text"><span class="sg-title">Explain this codebase</span><span class="sg-desc">A short tour of what's here and how it fits together</span></span>
+          </button>
+          <button type="button" class="suggestion" data-prompt="Run the tests, find what's failing, and fix it.">
+            <span class="sg-icon" style="--c:#e5484d">!</span>
+            <span class="sg-text"><span class="sg-title">Find and fix a bug</span><span class="sg-desc">Run the tests and chase down what breaks</span></span>
+          </button>
+          <button type="button" class="suggestion" data-prompt="Find code that isn't covered by tests and write tests for the most important parts.">
+            <span class="sg-icon" style="--c:#46b26b">✓</span>
+            <span class="sg-text"><span class="sg-title">Write tests</span><span class="sg-desc">Cover the parts that matter most</span></span>
+          </button>
+          <button type="button" class="suggestion" data-prompt="Review the uncommitted changes and recent commits. Point out bugs and anything risky.">
+            <span class="sg-icon" style="--c:#8b5cf6">↺</span>
+            <span class="sg-text"><span class="sg-title">Review recent changes</span><span class="sg-desc">Look over the diff for bugs and risks</span></span>
+          </button>
+        </div>
+      </div>
+      <div id="messages" class="messages"></div>
+    </section>
+
+    <button id="jump" class="jump" type="button" hidden>Jump to latest</button>
+
+    <footer class="composer">
+      <div id="composer-status" class="composer-status" hidden>
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="busy-text">Working</span>
+        <span id="queued" class="queued" hidden></span>
+      </div>
+      <form id="composer-form" class="composer-row">
+        <textarea id="prompt" rows="1" placeholder="Message Ta-Da" autocomplete="off" autocapitalize="sentences" enterkeyhint="send" aria-label="Prompt"></textarea>
+        <button id="stop" class="btn btn-stop" type="button" hidden>Stop</button>
+        <button id="send" class="btn btn-send" type="submit" aria-label="Send">Send</button>
+      </form>
+    </footer>
+  </main>
+</div>
+
+<div id="token-screen" class="overlay" hidden>
+  <form id="token-form" class="token-card">
+    <h1>Ta-Da Remote</h1>
+    <p>Paste the access token that <code>tada remote</code> printed in the terminal on your computer.</p>
+    <label for="token-input" class="field-label">Token</label>
+    <input id="token-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+    <p id="token-error" class="form-error" hidden></p>
+    <button class="btn btn-primary btn-block" type="submit">Connect</button>
+  </form>
+</div>
+
+<div id="sheet-root" class="sheet-root" hidden>
+  <div class="sheet-scrim"></div>
+  <div id="sheet" class="sheet" role="dialog" aria-modal="true"></div>
+</div>
+
+<div id="toast" class="toast" role="alert" hidden></div>
+</body>
+</html>

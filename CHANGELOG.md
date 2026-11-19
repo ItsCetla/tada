@@ -7,6 +7,21 @@ listed; see the [upstream releases](https://github.com/charmbracelet/crush/relea
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-19
+
+### Added
+
+- **Remote control.** `tada remote` serves a web app on your Tailscale or
+  LAN address so you can send prompts, follow the agent and answer
+  permission prompts from a phone or another computer; it prints a link
+  and a QR code. `tada --remote` does the same while you keep using the
+  TUI, with both sharing the same sessions. Access needs the token in the
+  link. Remote devices can't turn permission prompts off or stop the host
+  unless it was started with `--allow-auto`, which adds an Auto switch to
+  the web app's header. `tada remote --auto` starts every project the web
+  app opens in Auto mode, with no prompts. LAN connections are
+  unencrypted HTTP; Tailscale is the safer route.
+
 ## [0.7.1] - 2026-11-17
 
 ### Security

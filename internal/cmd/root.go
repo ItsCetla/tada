@@ -127,6 +127,14 @@ tada --resume auth bug
 		resume, _ := cmd.Flags().GetString("resume")
 		resumeSet := cmd.Flags().Changed("resume")
 
+		if cmd.Flags().Changed("remote") {
+			stopRemote, err := startRemoteForTUI(cmd)
+			if err != nil {
+				return err
+			}
+			defer stopRemote()
+		}
+
 		ws, cleanup, err := setupWorkspaceWithProgressBar(cmd)
 		if err != nil {
 			return err
@@ -306,7 +314,7 @@ func setupWorkspaceWithProgressBar(cmd *cobra.Command) (workspace.Workspace, fun
 // ClientWorkspace. Otherwise it creates an in-process app.App and
 // returns an AppWorkspace.
 func setupWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error) {
-	if useClientServer() {
+	if useClientServer() || remoteTUI {
 		return setupClientServerWorkspace(cmd)
 	}
 	return setupLocalWorkspace(cmd)

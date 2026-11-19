@@ -102,9 +102,13 @@
         <div class="section-head">
           <span class="eyebrow">What's new</span>
           <h2 id="new-title">Less prompt, more work. Your machines together. You stay in control.</h2>
-          <p>The first six cards are on <code>main</code> ahead of the next release; the rest shipped in 0.6.0. Everything is in the <a href="https://github.com/ItsCetla/tada/blob/main/CHANGELOG.md">changelog</a>.</p>
+          <p>Remote control is new in 0.8.0, the next six cards shipped in 0.7, and the rest in 0.6.0. Everything is in the <a href="https://github.com/ItsCetla/tada/blob/main/CHANGELOG.md">changelog</a>.</p>
         </div>
         <div class="cards">
+          <article class="card">
+            <h3><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></svg></span>Remote control from your phone</h3>
+            <p><code>tada remote</code> serves a web app over Tailscale or your LAN: scan the QR code, then send prompts, follow the agent and answer permission prompts from your phone. <code>tada --remote</code> shares the same sessions with the TUI you're using. The link carries an access token. Prompts stay on unless you start the host with <code>--allow-auto</code>, which adds an Auto switch, or <code>--auto</code>, which runs every remote session without asking.</p>
+          </article>
           <article class="card">
             <h3><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12h8M12 8v8"/></svg></span>A lean tool profile</h3>
             <p>The model gets a small core of tools instead of everything at once. <code>option tool-profile lean</code> trims the built-ins and hides MCP tools; <code>option enable-tool &lt;name&gt;</code> adds a single tool or a whole MCP server back. Artifact tools are now opt-in with <code>option enable-tool artifact</code> (plus <code>artifact_data</code> and <code>artifact_comments</code>); <code>machines</code> stays on whenever you have machines configured. If you leave the profile unset and the prompt plus tools would fill more than half the model's window, the session starts lean on its own.</p>

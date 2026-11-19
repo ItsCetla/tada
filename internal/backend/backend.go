@@ -114,6 +114,11 @@ type Backend struct {
 	// makes the shutdown-vs-create decision atomic: a create can never
 	// be handed a workspace on a process that is already leaving.
 	closing bool
+	// persistent disables idle shutdown: the server stays up with no
+	// workspaces, and a client's shutdown request is refused. Remote
+	// control hosts set it, since a phone that reconnects later needs
+	// the listener to still be there. It is guarded by mu.
+	persistent bool
 	// retired holds the IDs of clients that announced their exit via
 	// RetireClient. Creates from a retired client are refused, which is what
 	// lets a client release a workspace whose ID it never learned.
@@ -331,6 +336,43 @@ func (b *Backend) SetIdleShutdownDelay(d time.Duration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.lingerDelay = d
+}
+
+// SetPersistent turns idle shutdown off (or back on). A persistent
+// backend keeps serving with no workspaces and refuses a client's
+// shutdown request; only [Backend.Shutdown] or the process ending stops
+// it.
+func (b *Backend) SetPersistent(persistent bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.persistent = persistent
+	if persistent {
+		b.cancelShutdownLocked()
+	}
+}
+
+// ShutdownWorkspaces refuses further creates and shuts every hosted
+// workspace down, whether or not clients still hold it. It is for a
+// process that hosts the backend itself and is about to exit, where
+// waiting for remote clients to let go is not an option.
+func (b *Backend) ShutdownWorkspaces() {
+	b.mu.Lock()
+	b.closing = true
+	b.cancelShutdownLocked()
+	all := make([]*Workspace, 0, b.workspaces.Len())
+	for ws := range b.workspaces.Seq() {
+		all = append(all, ws)
+	}
+	for _, ws := range all {
+		if existing, ok := b.pathIndex[ws.resolvedPath]; ok && existing == ws.ID {
+			delete(b.pathIndex, ws.resolvedPath)
+		}
+		b.workspaces.Del(ws.ID)
+	}
+	b.mu.Unlock()
+	for _, ws := range all {
+		ws.invokeShutdown()
+	}
 }
 
 // GetWorkspace retrieves a workspace by ID.
@@ -873,7 +915,7 @@ func (b *Backend) teardown(ws *Workspace) {
 // Returning true also latches [Backend.closing], since the caller has to
 // release b.mu before it can run shutdownFn.
 func (b *Backend) scheduleShutdownIfIdleLocked() (shutdownNow bool) {
-	if b.shutdownFn == nil {
+	if b.shutdownFn == nil || b.persistent {
 		return false
 	}
 	if b.workspaces.Len() != 0 || b.pending != 0 {
@@ -1074,7 +1116,7 @@ func (b *Backend) Shutdown() {
 func (b *Backend) ShutdownIfIdle() bool {
 	b.mu.Lock()
 	live, pending := b.workspaces.Len(), b.pending
-	idle := live == 0 && pending == 0
+	idle := live == 0 && pending == 0 && !b.persistent
 	if idle {
 		b.closing = true
 	}

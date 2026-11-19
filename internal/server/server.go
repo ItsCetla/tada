@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/config"
@@ -121,6 +122,11 @@ type Server struct {
 
 	backend *backend.Backend
 	logger  *slog.Logger
+
+	// remotes are the remote control listeners' servers; see
+	// [Server.ServeRemote].
+	remoteMu sync.Mutex
+	remotes  []*http.Server
 }
 
 // SetLogger sets the logger for the server.
@@ -209,14 +215,25 @@ func (s *Server) ListenAndServe() error {
 	if s.network == "tcp" {
 		slog.Warn("The Ta-Da server listens on TCP without authentication: any local process can connect, drive the agent and read the environment clients send", "address", s.Addr)
 	}
+	ln, err := s.Listen()
+	if err != nil {
+		return err
+	}
+	return s.Serve(ln)
+}
+
+// Listen binds the server's own address and returns the listener for
+// [Server.Serve]. Splitting the two lets a caller know the address is
+// accepting connections before it starts a client against it.
+func (s *Server) Listen() (net.Listener, error) {
 	ln, removedStale, err := listen(s.network, s.Addr)
 	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %w", s.Addr, err)
+		return nil, fmt.Errorf("failed to listen on %s: %w", s.Addr, err)
 	}
 	if removedStale && s.logger != nil {
 		s.logger.Warn("Removed stale socket before binding", "address", s.Addr)
 	}
-	return s.Serve(ln)
+	return ln, nil
 }
 
 func (s *Server) closeListener() {
@@ -229,6 +246,7 @@ func (s *Server) closeListener() {
 // Close force closes all listeners and connections.
 func (s *Server) Close() error {
 	defer func() { s.closeListener() }()
+	s.closeRemotes()
 	return s.h.Close()
 }
 
@@ -236,6 +254,7 @@ func (s *Server) Close() error {
 // connections.
 func (s *Server) Shutdown(ctx context.Context) error {
 	defer func() { s.closeListener() }()
+	s.closeRemotes()
 	return s.h.Shutdown(ctx)
 }
 

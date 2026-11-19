@@ -72,6 +72,7 @@ require (
 	modernc.org/sqlite v1.58.0
 	mvdan.cc/sh/v3 v3.14.1
 	mvdan.cc/sh/x v0.0.0-20260907232430-b5028a3332a4
+	rsc.io/qr v0.2.0
 )
 
 require (

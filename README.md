@@ -605,6 +605,55 @@ down. There is a short grace window right after `POST /v1/workspaces` so a
 client that has created the workspace but not yet opened its event stream
 does not get reaped before it can attach.
 
+### Remote control
+
+Drive Ta-Da from your phone or another computer, over Tailscale or your
+local network. The host serves a small web app: open the link, type
+prompts, watch the agent work, and answer permission prompts and questions.
+
+```bash
+# In a project: start a host and print a link and QR code.
+tada remote
+
+# Or run the normal TUI and share it. The phone and the TUI see the same
+# sessions and the same permission prompts.
+tada --remote
+```
+
+By default the host listens on your Tailscale address when Tailscale is
+running, otherwise on your LAN address, on port 7532 (the next free port is
+used when it's taken). Choose with `--listen` (`--remote=` for the TUI):
+
+```bash
+tada remote --listen lan                  # local network only
+tada remote --listen tailscale            # Tailscale only
+tada remote --listen all                  # both
+tada remote --listen 192.168.1.20:8080    # one specific address
+tada --remote=lan
+```
+
+`tada remote url` prints the link of a running host again, and
+`tada remote rotate-token` replaces the access token (restart the host
+afterwards; devices need the new link).
+
+Things to know:
+
+- **The link is the key.** It carries an access token, saved in Ta-Da's
+  data directory and reused between runs. Anyone with the link can run the
+  agent on your machine, so treat it like a password. Pass `--token` to
+  use your own.
+- **Tailscale is the safer route.** Traffic over Tailscale is encrypted.
+  On a plain LAN address the connection is unencrypted HTTP, so anyone on
+  that network could read the token: use it only on networks you trust.
+- **Permission prompts stay on.** A remote device can answer prompts but
+  can't switch them off or stop the host, unless you start it with
+  `--allow-auto`. Then the web app shows an Auto switch in its header that
+  turns prompts off for the project. `tada remote --auto` goes further:
+  every project the web app opens starts in Auto mode, so the agent runs
+  without asking.
+- The host can open any project on the machine, not only the folder it was
+  started in.
+
 ### Global context files
 
 Ta-Da automatically includes two files for cross-project instructions. Think of
